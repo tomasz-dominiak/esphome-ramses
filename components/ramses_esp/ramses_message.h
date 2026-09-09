@@ -66,7 +66,12 @@ struct RamsesMessage {
   uint8_t n_payload{0};
   uint8_t payload[RAMSES_MAX_PAYLOAD]{0};
 
-  std::string timestamp;
+  // Fixed-size buffer (not std::string): RamsesMessage instances are copied by raw
+  // memcpy through FreeRTOS queues (xQueueSend/xQueueReceive), which does not run
+  // C++ copy/move/destructor semantics. A heap-owning member here would let two
+  // "copies" alias the same heap buffer, leading to use-after-free/double-free
+  // once either copy is destroyed. Keep this struct trivially copyable.
+  char timestamp[24]{0};
 
   void reset();
   bool is_valid() const;

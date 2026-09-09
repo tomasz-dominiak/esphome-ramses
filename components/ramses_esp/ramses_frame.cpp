@@ -280,9 +280,8 @@ void RamsesFrameHandler::handle_rx_done() {
   struct tm *nowtm = localtime(&tv.tv_sec);
   if (nowtm != nullptr) {
     strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%dT%H:%M:%S", nowtm);
-    char full_ts[48];
-    snprintf(full_ts, sizeof(full_ts), "%s.%03ld", ts_buf, tv.tv_usec / 1000);
-    this->current_msg_.timestamp = full_ts;
+    snprintf(this->current_msg_.timestamp, sizeof(this->current_msg_.timestamp), "%s.%03ld", ts_buf,
+             tv.tv_usec / 1000);
   }
 
   if (this->current_msg_.is_valid()) {
