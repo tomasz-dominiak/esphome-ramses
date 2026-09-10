@@ -221,9 +221,18 @@ void RamsesESPComponent::process_tx_queue() {
       this->cc1101_.enter_idle_mode();
 
       std::vector<uint8_t> raw_frame = tx_msg.to_raw_frame();
-      this->cc1101_.enter_tx_mode();
+      this->cc1101_.prepare_tx_mode();
 
+      // Napełniamy TX FIFO PRZED strobem STX — inaczej puste FIFO wywołuje
+      // TXFIFO_UNDERFLOW w czasie jednego bajtu i ramka nigdy nie jest wysłana.
       size_t sent = 0;
+      size_t preload = std::min<size_t>(64, raw_frame.size());
+      for (; sent < preload; sent++) {
+        this->cc1101_.write_fifo(raw_frame[sent]);
+      }
+
+      this->cc1101_.start_tx();
+
       uint32_t start_ms = millis();
       while (sent < raw_frame.size() && (millis() - start_ms < 500)) {
         uint8_t space = this->cc1101_.write_fifo(raw_frame[sent++]);
