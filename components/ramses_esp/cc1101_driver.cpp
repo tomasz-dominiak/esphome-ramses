@@ -1,5 +1,6 @@
 #include "cc1101_driver.h"
 #include "esphome/core/log.h"
+#include "esphome/core/hal.h"
 #include "esp_rom_sys.h"
 #include <cstring>
 #include <cmath>
@@ -10,6 +11,11 @@ static const char *TAG = "ramses_esp.cc1101";
 
 namespace esphome {
 namespace ramses_esp {
+
+// Maksymalny czas oczekiwania na zmianę stanu układu (SIDLE / SRX / STX).
+// Po jego przekroczeniu zamiast kręcić się w nieskończoność czyścimy kolejki
+// i wracamy — utrata jednej ramki jest akceptowalna, zawieszenie bramki nie.
+static const uint32_t CC_STATE_TIMEOUT_MS = 50;
 
 static const uint8_t CC_RAMSES_CFG[CC_PARAM_MAX] = {
     0x0D, // CC_IOCFG2   GDO2- RX data
@@ -61,8 +67,10 @@ static const uint8_t CC_RAMSES_CFG[CC_PARAM_MAX] = {
     0x09  // CC_TEST0
 };
 
+// FREND0.PA_POWER = 0, więc układ używa wyłącznie PATABLE[0].
+// 0x8E = 0 dBm wg tabeli mocy TI dla 868 MHz.
 static const uint8_t CC_DEFAULT_PA[CC_PA_MAX] = {
-    0xC3, 0, 0, 0, 0, 0, 0, 0
+    0x8E, 0, 0, 0, 0, 0, 0, 0
 };
 
 bool CC1101Driver::init(spi_host_device_t host, gpio_num_t sck, gpio_num_t mosi, gpio_num_t miso, gpio_num_t cs) {
@@ -74,13 +82,6 @@ bool CC1101Driver::init(spi_host_device_t host, gpio_num_t sck, gpio_num_t mosi,
 
   this->spi_reset();
 
-  // spi_bus_config_t buscfg = {};
-  // buscfg.mosi_io_num = this->mosi_pin_;
-  // buscfg.miso_io_num = this->miso_pin_;
-  // buscfg.sclk_io_num = this->sck_pin_;
-  // buscfg.quadwp_io_num = -1;
-  // buscfg.quadhd_io_num = -1;
-  // buscfg.max_transfer_sz = 64;
   spi_bus_config_t buscfg = {
       .mosi_io_num = this->mosi_pin_,
       .miso_io_num = this->miso_pin_,
@@ -97,6 +98,7 @@ bool CC1101Driver::init(spi_host_device_t host, gpio_num_t sck, gpio_num_t mosi,
 
   spi_device_interface_config_t devcfg = {};
   devcfg.mode = 0;
+  // CC1101: dostęp burst (FIFO, rejestry statusowe) maks. 6,5 MHz.
   devcfg.clock_speed_hz = 1000000; // 1 MHz
   devcfg.spics_io_num = this->cs_pin_;
   devcfg.flags = SPI_DEVICE_NO_DUMMY;
@@ -181,8 +183,20 @@ void CC1101Driver::write_fifo_burst(const uint8_t *data, size_t len) {
 }
 
 void CC1101Driver::enter_idle_mode() {
-  while (CC_STATE(this->strobe(CC_SIDLE)) != CC_STATE_IDLE) {
+  const uint32_t start = millis();
+  uint8_t state = CC_STATE(this->strobe(CC_SIDLE));
+  while (state != CC_STATE_IDLE) {
+    if (millis() - start > CC_STATE_TIMEOUT_MS) {
+      // Układ utknął (najczęściej TX_UNDERFLOW / RX_OVERFLOW).
+      // Czyścimy obie kolejki i wracamy zamiast kręcić się w nieskończoność.
+      ESP_LOGW(TAG, "enter_idle_mode: timeout, stan=0x%02X — czyszczę FIFO", state);
+      this->strobe(CC_SFTX);
+      this->strobe(CC_SFRX);
+      this->strobe(CC_SIDLE);
+      return;
+    }
     delayMicroseconds(10);
+    state = CC_STATE(this->strobe(CC_SIDLE));
   }
 }
 
@@ -191,8 +205,19 @@ void CC1101Driver::enter_rx_mode() {
   this->write_reg(CC_IOCFG0, 0x2E);   // GDO0 not needed / async
   this->write_reg(CC_PKTCTRL0, 0x32); // Asynchronous, infinite packet
   this->strobe(CC_SFRX);
-  while (CC_STATE(this->strobe(CC_SRX)) != CC_STATE_RX) {
+
+  const uint32_t start = millis();
+  uint8_t state = CC_STATE(this->strobe(CC_SRX));
+  while (state != CC_STATE_RX) {
+    if (millis() - start > CC_STATE_TIMEOUT_MS) {
+      ESP_LOGW(TAG, "enter_rx_mode: timeout, stan=0x%02X — czyszczę FIFO", state);
+      this->strobe(CC_SFTX);
+      this->strobe(CC_SFRX);
+      this->strobe(CC_SIDLE);
+      return;
+    }
     delayMicroseconds(10);
+    state = CC_STATE(this->strobe(CC_SRX));
   }
 }
 
@@ -201,8 +226,19 @@ void CC1101Driver::enter_tx_mode() {
   this->write_reg(CC_PKTCTRL0, 0x02); // Fifo mode, infinite packet
   this->write_reg(CC_IOCFG0, 0x03);   // Falling edge, TX Fifo low
   this->strobe(CC_SFTX);
-  while (CC_STATE(this->strobe(CC_STX)) != CC_STATE_TX) {
+
+  const uint32_t start = millis();
+  uint8_t state = CC_STATE(this->strobe(CC_STX));
+  while (state != CC_STATE_TX) {
+    if (millis() - start > CC_STATE_TIMEOUT_MS) {
+      ESP_LOGW(TAG, "enter_tx_mode: timeout, stan=0x%02X — czyszczę FIFO", state);
+      this->strobe(CC_SFTX);
+      this->strobe(CC_SFRX);
+      this->strobe(CC_SIDLE);
+      return;
+    }
     delayMicroseconds(10);
+    state = CC_STATE(this->strobe(CC_STX));
   }
 }
 
@@ -223,14 +259,16 @@ void CC1101Driver::apply_ramses_config() {
   }
   // TX Fifo Threshold 17
   this->write_reg(CC_FIFOTHR, (CC_RAMSES_CFG[CC_FIFOTHR] & 0xF0) + 11);
-  for (uint8_t i = 0; i < CC_PA_MAX; i++) {
-  // PATABLE: pojedynczy zapis trafia zawsze w PATABLE[0], więc pętla
-  // kończyła się wpisaniem 0x00 — nadajnik z mocą zero.
-  // FREND0.PA_POWER = 0, czyli używany jest wyłącznie PATABLE[0].
+
+  // PATABLE: pojedynczy zapis trafia ZAWSZE w PATABLE[0] — indeks się nie
+  // przesuwa. Pętla po całej tablicy kończyła się więc wpisaniem 0x00,
+  // czyli nadajnikiem z mocą zero. FREND0.PA_POWER = 0, więc i tak
+  // używany jest wyłącznie PATABLE[0] — jeden zapis wystarcza.
   this->write_reg(CC_PATABLE, CC_DEFAULT_PA[0]);
-  }
+
   this->enter_rx_mode();
-  ESP_LOGI(TAG, "CC1101 configured for RAMSES II RX (868.3 MHz)");
+  ESP_LOGI(TAG, "CC1101 configured for RAMSES II RX (868.3 MHz), PA=0x%02X",
+           CC_DEFAULT_PA[0]);
 }
 
 void CC1101Driver::apply_custom_tx_config(const CustomTxConfig &cfg) {
