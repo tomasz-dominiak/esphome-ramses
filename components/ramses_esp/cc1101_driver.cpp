@@ -252,6 +252,46 @@ void CC1101Driver::fifo_end() {
   this->write_reg(CC_IOCFG0, 0x05); // Rising edge, TX Fifo empty
 }
 
+// Czeka aż TX FIFO faktycznie się opróżni (bajty zostały wysłane przez
+// radio), zamiast na sztywno odczekać stały czas. Dłuższe ramki (payload
+// kilkanaście-kilkadziesiąt bajtów) potrafią nadawać się dłużej niż 15 ms —
+// przy stałym opóźnieniu enter_idle_mode() ucinało transmisję w połowie,
+// więc odbiornik dostawał okrojoną ramkę i ją odrzucał, mimo że firmware
+// zgłaszał sukces.
+//
+// TXBYTES (0x3A) to rejestr statusowy — odczyt musi mieć ustawiony bit
+// burst (zaszyty w CC_TXBYTES), inaczej układ potraktuje go jak strobe
+// komendy pod tym samym adresem (ten sam mechanizm, przez który PATABLE
+// zapisywało się w PATABLE[0] i nadajnik miał moc zero).
+//
+// Erratum TI: odczyt TXBYTES potrafi być chwilowo błędny w trakcie
+// opróżniania FIFO, więc dwa kolejne odczyty muszą się zgadzać zanim
+// wynik zostanie zaakceptowany.
+bool CC1101Driver::wait_tx_complete(uint32_t timeout_ms) {
+  const uint32_t start = millis();
+  while (true) {
+    uint8_t a = this->read_reg(CC_TXBYTES);
+    uint8_t b = this->read_reg(CC_TXBYTES);
+    if (a == b) {
+      if (a & 0x80) {
+        ESP_LOGW(TAG, "wait_tx_complete: TX FIFO underflow — awaryjny SFTX");
+        this->strobe(CC_SFTX);
+        return false;
+      }
+      if ((a & 0x7F) == 0) {
+        return true;
+      }
+    }
+    if (millis() - start > timeout_ms) {
+      ESP_LOGW(TAG, "wait_tx_complete: timeout po %lu ms, TXBYTES=0x%02X — awaryjny SFTX",
+               (unsigned long)timeout_ms, b);
+      this->strobe(CC_SFTX);
+      return false;
+    }
+    delayMicroseconds(50);
+  }
+}
+
 uint8_t CC1101Driver::read_rssi() {
   int8_t rssi = static_cast<int8_t>(this->read_reg(CC_RSSI));
   rssi = rssi / 2 - 74;

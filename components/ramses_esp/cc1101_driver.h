@@ -36,6 +36,7 @@ class CC1101Driver {
   void prepare_tx_mode();
   void start_tx();
   void fifo_end();
+  bool wait_tx_complete(uint32_t timeout_ms);
   uint8_t read_rssi();
 
   void apply_ramses_config();

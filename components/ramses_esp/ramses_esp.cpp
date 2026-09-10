@@ -231,6 +231,7 @@ void RamsesESPComponent::process_tx_queue() {
         this->cc1101_.write_fifo(raw_frame[sent]);
       }
 
+      uint32_t tx_cycle_start_us = micros();
       this->cc1101_.start_tx();
 
       uint32_t start_ms = millis();
@@ -242,15 +243,31 @@ void RamsesESPComponent::process_tx_queue() {
       }
 
       this->cc1101_.fifo_end();
-      // Wait for transmission completion
-      vTaskDelay(pdMS_TO_TICKS(15));
+      // Czekamy aż FIFO faktycznie się opróżni zamiast na sztywno 15 ms —
+      // dla dłuższych ramek (payload >~40 B) transmisja trwa dłużej niż
+      // 15 ms i była ucinana w połowie, zanim urządzenie zdążyło ją
+      // odebrać, mimo że echo niżej i tak zgłaszało sukces.
+      bool tx_ok = this->cc1101_.wait_tx_complete(50);
+      if (!tx_ok) {
+        ESP_LOGW(TAG, "TX ucięte, echo pominięte: %s", tx_msg.to_hgi80().c_str());
+      } else {
+        // Echo the transmitted frame back to TCP clients so ramses_tx sees the
+        // expected self-echo and can leave its WantEcho state. Wysyłane
+        // dopiero po potwierdzonym opróżnieniu FIFO — inaczej log/ramses_tx
+        // widziałby poprawną ramkę nawet gdy w eter poleciał tylko urywek.
+        this->broadcast_hgi80(tx_msg.to_hgi80());
+      }
 
-      // Echo the transmitted frame back to TCP clients so ramses_tx sees the
-      // expected self-echo and can leave its WantEcho state.
-      this->broadcast_hgi80(tx_msg.to_hgi80());
-
-      this->cc1101_.apply_ramses_config();
+      // Powrót do RX bez przepisywania wszystkich 47 rejestrów + PATABLE:
+      // nadawanie zmienia tylko PKTCTRL0 i IOCFG0, a te dwa i tak ustawia
+      // enter_rx_mode(). Skraca to okno głuchoty gateway'a po transmisji —
+      // urządzenia w sieci RAMSES odpowiadają po 16-21 ms, więc każda
+      // dodatkowa milisekunda martwego czasu gubi odpowiedzi.
+      this->cc1101_.enter_rx_mode();
       this->frame_handler_.rx_enable();
+
+      uint32_t tx_cycle_us = micros() - tx_cycle_start_us;
+      ESP_LOGD(TAG, "Cykl STX -> z powrotem w RX: %lu us", (unsigned long)tx_cycle_us);
 
       xSemaphoreGive(this->radio_mutex_);
     }
