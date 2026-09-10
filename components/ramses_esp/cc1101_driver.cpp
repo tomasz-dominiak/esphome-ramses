@@ -224,7 +224,10 @@ void CC1101Driver::apply_ramses_config() {
   // TX Fifo Threshold 17
   this->write_reg(CC_FIFOTHR, (CC_RAMSES_CFG[CC_FIFOTHR] & 0xF0) + 11);
   for (uint8_t i = 0; i < CC_PA_MAX; i++) {
-    this->write_reg(CC_PATABLE, CC_DEFAULT_PA[i]);
+  // PATABLE: pojedynczy zapis trafia zawsze w PATABLE[0], więc pętla
+  // kończyła się wpisaniem 0x00 — nadajnik z mocą zero.
+  // FREND0.PA_POWER = 0, czyli używany jest wyłącznie PATABLE[0].
+  this->write_reg(CC_PATABLE, CC_DEFAULT_PA[0]);
   }
   this->enter_rx_mode();
   ESP_LOGI(TAG, "CC1101 configured for RAMSES II RX (868.3 MHz)");
