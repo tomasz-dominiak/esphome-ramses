@@ -23,6 +23,7 @@ ota:
 
 logger:
   level: DEBUG
+  task_log_buffer_size: 4096
 
 wifi:
   ssid: "MyWiFiNetwork"

@@ -1,6 +1,7 @@
 #include "ramses_frame.h"
 #include "ramses_codec.h"
 #include "esphome/core/log.h"
+#include "esphome/core/hal.h"
 #include <sys/time.h>
 #include <ctime>
 #include <cstdio>
@@ -71,6 +72,7 @@ void RamsesFrameHandler::rx_enable() {
   uart_enable_rx_intr(this->uart_num_);
   this->rx_state_ = FRM_RX_IDLE;
   this->reset_rx();
+  this->reset_preamble_capture();
 }
 
 void RamsesFrameHandler::rx_disable() {
@@ -100,6 +102,15 @@ void RamsesFrameHandler::reset_rx() {
   this->current_msg_.reset();
 }
 
+// Osobno od reset_rx(): reset_rx() jest wołane też w momencie dopasowania
+// słowa sync (żeby przygotować stan do parsowania ciała), a wtedy właśnie
+// chcemy ZACHOWAĆ policzoną preambułę do zalogowania w handle_rx_done().
+// Ten reset uzbraja licznik od nowa tylko przy starcie nasłuchu na
+// KOLEJNĄ ramkę (rx_enable() i po DONE/ABORT w work()).
+void RamsesFrameHandler::reset_preamble_capture() {
+  this->rx_preamble_count_ = 0;
+}
+
 void RamsesFrameHandler::work() {
   if (this->rx_state_ == FRM_RX_OFF || this->uart_queue_ == nullptr) return;
 
@@ -116,16 +127,27 @@ void RamsesFrameHandler::work() {
       xQueueReset(this->uart_queue_);
       this->rx_state_ = FRM_RX_IDLE;
       this->reset_rx();
+      this->reset_preamble_capture();
     }
+  }
+
+  // Ciało ramki się skończyło (trailer wykryty), ale czekamy jeszcze na
+  // bajty PO nim, żeby zmierzyć rzeczywisty ogon transmisji. Brak nowego
+  // bajtu przez RAMSES_TRAILER_IDLE_MS uznajemy za koniec transmisji.
+  if (this->rx_state_ == FRM_RX_TRAILER &&
+      (millis() - this->rx_trailer_last_byte_ms_) > RAMSES_TRAILER_IDLE_MS) {
+    this->rx_state_ = FRM_RX_DONE;
   }
 
   if (this->rx_state_ == FRM_RX_DONE) {
     this->handle_rx_done();
     this->rx_state_ = FRM_RX_IDLE;
     this->reset_rx();
+    this->reset_preamble_capture();
   } else if (this->rx_state_ == FRM_RX_ABORT) {
     this->rx_state_ = FRM_RX_IDLE;
     this->reset_rx();
+    this->reset_preamble_capture();
   }
 }
 
@@ -157,6 +179,11 @@ void RamsesFrameHandler::process_rx_byte(uint8_t b) {
 
     case FRM_RX_IDLE:
     case FRM_RX_SYNCH:
+      // Zapisujemy KAŻDY bajt widziany przed dopasowaniem, łącznie z
+      // czterema bajtami samego słowa sync — bufor cykliczny, więc po
+      // dopasowaniu jego ostatnie 4 bajty to zawsze sync widziany z eteru.
+      this->rx_preamble_tail_[this->rx_preamble_count_ % RAMSES_PREAMBLE_TAIL_CAP] = b;
+      this->rx_preamble_count_++;
       this->sync_buffer_ = (this->sync_buffer_ << 8) | b;
       if (this->sync_buffer_ == RAMSES_SYNC_WORD) {
         this->rx_state_ = FRM_RX_MESSAGE;
@@ -166,7 +193,12 @@ void RamsesFrameHandler::process_rx_byte(uint8_t b) {
 
     case FRM_RX_MESSAGE:
       if (b == RAMSES_TRAILER) {
-        this->rx_state_ = FRM_RX_DONE;
+        // Nie kończymy od razu — łapiemy jeszcze bajty PO znaczniku
+        // trailera, żeby zmierzyć rzeczywisty ogon transmisji (patrz work()).
+        this->rx_trailer_count_ = 0;
+        this->rx_trailer_capture_[this->rx_trailer_count_++] = b;
+        this->rx_trailer_last_byte_ms_ = millis();
+        this->rx_state_ = FRM_RX_TRAILER;
         return;
       }
 
@@ -266,6 +298,13 @@ void RamsesFrameHandler::process_rx_byte(uint8_t b) {
       }
       break;
 
+    case FRM_RX_TRAILER:
+      if (this->rx_trailer_count_ < RAMSES_TRAILER_CAP) {
+        this->rx_trailer_capture_[this->rx_trailer_count_++] = b;
+      }
+      this->rx_trailer_last_byte_ms_ = millis();
+      break;
+
     case FRM_RX_DONE:
     case FRM_RX_ABORT:
       break;
@@ -292,12 +331,45 @@ void RamsesFrameHandler::handle_rx_done() {
   // eteru. Do usunięcia po zdiagnozowaniu, dlaczego centrala ignoruje
   // ramki nadawane przez to_raw_frame() mimo poprawnej treści/mocy/czasu.
   {
-    char raw_hex[RAMSES_MAX_RAW * 3 + 1];
+    // Odtwarzamy ostatnie (do RAMSES_PREAMBLE_TAIL_CAP) bajty widziane
+    // przed dopasowaniem sync, w kolejności chronologicznej — bufor jest
+    // cykliczny (patrz process_rx_byte/FRM_RX_IDLE).
+    uint32_t tail_len = std::min<uint32_t>(this->rx_preamble_count_, RAMSES_PREAMBLE_TAIL_CAP);
+    uint8_t preamble_tail[RAMSES_PREAMBLE_TAIL_CAP];
+    for (uint32_t k = 0; k < tail_len; k++) {
+      uint32_t abs_pos = this->rx_preamble_count_ - tail_len + k;
+      preamble_tail[k] = this->rx_preamble_tail_[abs_pos % RAMSES_PREAMBLE_TAIL_CAP];
+    }
+
+    char pre_hex[RAMSES_PREAMBLE_TAIL_CAP * 3 + 1];
     int pos = 0;
+    for (uint32_t k = 0; k < tail_len && pos < (int)sizeof(pre_hex) - 3; k++) {
+      pos += snprintf(pre_hex + pos, sizeof(pre_hex) - pos, "%02X ", preamble_tail[k]);
+    }
+    ESP_LOGD(TAG, "RX preambuła: %lu B widzianych przed sync (ostatnie %lu, w tym 4B sync): %s",
+             (unsigned long)this->rx_preamble_count_, (unsigned long)tail_len, pre_hex);
+
+    // Ostatnie 4 bajty tego ogona to zawsze dopasowane słowo sync.
+    if (tail_len >= 4) {
+      ESP_LOGD(TAG, "RX sync: %02X %02X %02X %02X | TX koder sync: FF 00 33 55 53 (+preambuła 20x 0x55)",
+               preamble_tail[tail_len - 4], preamble_tail[tail_len - 3],
+               preamble_tail[tail_len - 2], preamble_tail[tail_len - 1]);
+    }
+
+    char raw_hex[RAMSES_MAX_RAW * 3 + 1];
+    pos = 0;
     for (uint8_t i = 0; i < this->rx_raw_count_ && pos < (int)sizeof(raw_hex) - 3; i++) {
       pos += snprintf(raw_hex + pos, sizeof(raw_hex) - pos, "%02X ", this->rx_raw_capture_[i]);
     }
     ESP_LOGD(TAG, "RX raw body (%u B, po sync/przed trailerem): %s", this->rx_raw_count_, raw_hex);
+
+    char trail_hex[RAMSES_TRAILER_CAP * 3 + 1];
+    pos = 0;
+    for (uint8_t i = 0; i < this->rx_trailer_count_ && pos < (int)sizeof(trail_hex) - 3; i++) {
+      pos += snprintf(trail_hex + pos, sizeof(trail_hex) - pos, "%02X ", this->rx_trailer_capture_[i]);
+    }
+    ESP_LOGD(TAG, "RX trailer (%u B od 0x35 do ciszy >%dms): %s | TX koder trailer: 35 55 (2 B)",
+             this->rx_trailer_count_, RAMSES_TRAILER_IDLE_MS, trail_hex);
   }
 
   if (this->current_msg_.is_valid()) {
