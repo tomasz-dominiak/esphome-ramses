@@ -368,8 +368,19 @@ void RamsesFrameHandler::handle_rx_done() {
     for (uint8_t i = 0; i < this->rx_trailer_count_ && pos < (int)sizeof(trail_hex) - 3; i++) {
       pos += snprintf(trail_hex + pos, sizeof(trail_hex) - pos, "%02X ", this->rx_trailer_capture_[i]);
     }
-    ESP_LOGD(TAG, "RX trailer (%u B od 0x35 do ciszy >%dms): %s | TX koder trailer: 35 55 (2 B)",
-             this->rx_trailer_count_, RAMSES_TRAILER_IDLE_MS, trail_hex);
+
+    // Bajty kodera czytane z tej samej tablicy, z której to_raw_frame()
+    // faktycznie buduje trailer — żeby ten log nigdy nie mógł zostać w
+    // tyle za rzeczywistą zawartością po kolejnej zmianie trailera.
+    char enc_trail_hex[RAMSES_TX_TRAILER_LEN * 3 + 1];
+    pos = 0;
+    for (size_t i = 0; i < RAMSES_TX_TRAILER_LEN && pos < (int)sizeof(enc_trail_hex) - 3; i++) {
+      pos += snprintf(enc_trail_hex + pos, sizeof(enc_trail_hex) - pos, "%02X ", RAMSES_TX_TRAILER[i]);
+    }
+
+    ESP_LOGD(TAG, "RX trailer (%u B od 0x35 do ciszy >%dms): %s | TX koder trailer: %s(%u B)",
+             this->rx_trailer_count_, RAMSES_TRAILER_IDLE_MS, trail_hex, enc_trail_hex,
+             (unsigned)RAMSES_TX_TRAILER_LEN);
   }
 
   if (this->current_msg_.is_valid()) {
