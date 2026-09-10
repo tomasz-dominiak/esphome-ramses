@@ -33,8 +33,7 @@ class CC1101Driver {
 
   void enter_idle_mode();
   void enter_rx_mode();
-  void prepare_tx_mode();
-  void start_tx();
+  void enter_tx_mode();
   void fifo_end();
   uint8_t read_rssi();
 

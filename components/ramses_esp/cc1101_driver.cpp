@@ -221,23 +221,17 @@ void CC1101Driver::enter_rx_mode() {
   }
 }
 
-void CC1101Driver::prepare_tx_mode() {
-  // Ustawia rejestry TX i czyści TX FIFO, ale zostaje w IDLE — STX strobujemy
-  // dopiero po napełnieniu FIFO (start_tx()), inaczej puste FIFO po STX
-  // wywołuje TXFIFO_UNDERFLOW w czasie jednego bajtu i żadna ramka nie
-  // trafia w eter.
+void CC1101Driver::enter_tx_mode() {
   this->enter_idle_mode();
   this->write_reg(CC_PKTCTRL0, 0x02); // Fifo mode, infinite packet
   this->write_reg(CC_IOCFG0, 0x03);   // Falling edge, TX Fifo low
   this->strobe(CC_SFTX);
-}
 
-void CC1101Driver::start_tx() {
   const uint32_t start = millis();
   uint8_t state = CC_STATE(this->strobe(CC_STX));
   while (state != CC_STATE_TX) {
     if (millis() - start > CC_STATE_TIMEOUT_MS) {
-      ESP_LOGW(TAG, "start_tx: timeout, stan=0x%02X — czyszczę FIFO", state);
+      ESP_LOGW(TAG, "enter_tx_mode: timeout, stan=0x%02X — czyszczę FIFO", state);
       this->strobe(CC_SFTX);
       this->strobe(CC_SFRX);
       this->strobe(CC_SIDLE);
