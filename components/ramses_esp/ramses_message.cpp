@@ -303,9 +303,9 @@ bool RamsesMessage::from_hgi80(const std::string &line) {
 
 std::vector<uint8_t> RamsesMessage::to_raw_frame() const {
   std::vector<uint8_t> frame;
-  // Preamble training sequence
-  for (int i = 0; i < 20; i++) {
-    frame.push_back(0x55);
+  // Preamble training sequence — patrz RAMSES_TX_PREAMBLE w ramses_message.h.
+  for (uint8_t pb : RAMSES_TX_PREAMBLE) {
+    frame.push_back(pb);
   }
   // Sync bytes
   frame.push_back(0xFF);

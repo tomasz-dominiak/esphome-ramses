@@ -37,6 +37,14 @@ enum RamsesMsgType {
 #define HDR_PARAM0 0x02
 #define HDR_PARAM1 0x01
 
+// Preambuła (trening 0x55) którą to_raw_frame() wstawia przed słowem sync.
+// Przechwyty z eteru pokazują konsekwentnie 6 bajtów u prawdziwego
+// urządzenia. Jedyne źródło prawdy o długości preambuły — diagnostyka w
+// ramses_frame.cpp czyta z tego samego symbolu, żeby zmiana długości nie
+// rozjechała jej po cichu.
+constexpr uint8_t RAMSES_TX_PREAMBLE[] = {0x55, 0x55, 0x55, 0x55, 0x55, 0x55};
+constexpr size_t RAMSES_TX_PREAMBLE_LEN = sizeof(RAMSES_TX_PREAMBLE) / sizeof(RAMSES_TX_PREAMBLE[0]);
+
 // Trailer, który to_raw_frame() dokłada po ostatnim bajcie danych (35 to
 // terminator rozpoznawany przez RX, kolejne 55 to zapas czasowy dla
 // modulatora, zanim TXFIFO_UNDERFLOW wymusi SIDLE). Jedyne źródło prawdy

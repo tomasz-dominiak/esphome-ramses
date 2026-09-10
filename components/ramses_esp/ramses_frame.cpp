@@ -351,9 +351,10 @@ void RamsesFrameHandler::handle_rx_done() {
 
     // Ostatnie 4 bajty tego ogona to zawsze dopasowane słowo sync.
     if (tail_len >= 4) {
-      ESP_LOGD(TAG, "RX sync: %02X %02X %02X %02X | TX koder sync: FF 00 33 55 53 (+preambuła 20x 0x55)",
+      ESP_LOGD(TAG, "RX sync: %02X %02X %02X %02X | TX koder sync: FF 00 33 55 53 (+preambuła %ux 0x55)",
                preamble_tail[tail_len - 4], preamble_tail[tail_len - 3],
-               preamble_tail[tail_len - 2], preamble_tail[tail_len - 1]);
+               preamble_tail[tail_len - 2], preamble_tail[tail_len - 1],
+               (unsigned)RAMSES_TX_PREAMBLE_LEN);
     }
 
     char raw_hex[RAMSES_MAX_RAW * 3 + 1];
@@ -387,10 +388,13 @@ void RamsesFrameHandler::handle_rx_done() {
     std::string hgi80 = this->current_msg_.to_hgi80();
     ESP_LOGI(TAG, "RX: %s", hgi80.c_str());
 
-    // to_raw_frame() layout: 20 B preambuły (0x55) + 5 B sync + treść
-    // zakodowana Manchesterem + 2 B trailer (0x35, 0x55).
+    // to_raw_frame() layout: RAMSES_TX_PREAMBLE_LEN B preambuły (0x55) +
+    // 5 B sync + treść zakodowana Manchesterem + RAMSES_TX_TRAILER_LEN B
+    // trailera. Sync ma stałą długość 5 (FF 00 33 55 53), nie ma osobnej
+    // współdzielonej stałej jak preambuła/trailer.
     std::vector<uint8_t> encoded = this->current_msg_.to_raw_frame();
-    static const size_t PREAMBLE_SYNC_LEN = 25;
+    static const size_t SYNC_LEN = 5;
+    static const size_t PREAMBLE_SYNC_LEN = RAMSES_TX_PREAMBLE_LEN + SYNC_LEN;
     static const size_t TRAILER_LEN = RAMSES_TX_TRAILER_LEN;
     if (encoded.size() >= PREAMBLE_SYNC_LEN + TRAILER_LEN) {
       size_t body_len = encoded.size() - PREAMBLE_SYNC_LEN - TRAILER_LEN;
