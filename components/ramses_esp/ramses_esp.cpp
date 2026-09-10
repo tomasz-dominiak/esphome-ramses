@@ -236,6 +236,10 @@ void RamsesESPComponent::process_tx_queue() {
       // Wait for transmission completion
       vTaskDelay(pdMS_TO_TICKS(15));
 
+      // Echo the transmitted frame back to TCP clients so ramses_tx sees the
+      // expected self-echo and can leave its WantEcho state.
+      this->broadcast_hgi80(tx_msg.to_hgi80());
+
       this->cc1101_.apply_ramses_config();
       this->frame_handler_.rx_enable();
 
