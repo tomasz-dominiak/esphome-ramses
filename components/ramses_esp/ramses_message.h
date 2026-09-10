@@ -37,6 +37,14 @@ enum RamsesMsgType {
 #define HDR_PARAM0 0x02
 #define HDR_PARAM1 0x01
 
+// Trailer, który to_raw_frame() dokłada po ostatnim bajcie danych (35 to
+// terminator rozpoznawany przez RX, kolejne 55 to zapas czasowy dla
+// modulatora, zanim TXFIFO_UNDERFLOW wymusi SIDLE). Jedyne źródło prawdy
+// o długości trailera — diagnostyka w ramses_frame.cpp liczy z tego samego
+// symbolu, żeby zmiana długości nie rozjechała jej po cichu.
+constexpr uint8_t RAMSES_TX_TRAILER[] = {0x35, 0x55, 0x55, 0x55, 0x55};
+constexpr size_t RAMSES_TX_TRAILER_LEN = sizeof(RAMSES_TX_TRAILER) / sizeof(RAMSES_TX_TRAILER[0]);
+
 struct RamsesAddress {
   uint8_t dev_class{0};
   uint32_t id{0};

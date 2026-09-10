@@ -380,7 +380,7 @@ void RamsesFrameHandler::handle_rx_done() {
     // zakodowana Manchesterem + 2 B trailer (0x35, 0x55).
     std::vector<uint8_t> encoded = this->current_msg_.to_raw_frame();
     static const size_t PREAMBLE_SYNC_LEN = 25;
-    static const size_t TRAILER_LEN = 2;
+    static const size_t TRAILER_LEN = RAMSES_TX_TRAILER_LEN;
     if (encoded.size() >= PREAMBLE_SYNC_LEN + TRAILER_LEN) {
       size_t body_len = encoded.size() - PREAMBLE_SYNC_LEN - TRAILER_LEN;
 

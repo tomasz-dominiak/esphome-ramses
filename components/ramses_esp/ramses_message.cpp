@@ -340,9 +340,10 @@ std::vector<uint8_t> RamsesMessage::to_raw_frame() const {
     frame.push_back(manchester_encode(b & 0x0F));
   }
 
-  // Trailer & trailing training
-  frame.push_back(0x35);
-  frame.push_back(0x55);
+  // Trailer & trailing training — patrz RAMSES_TX_TRAILER w ramses_message.h.
+  for (uint8_t tb : RAMSES_TX_TRAILER) {
+    frame.push_back(tb);
+  }
   return frame;
 }
 
