@@ -53,6 +53,12 @@ class RamsesFrameHandler {
   uint8_t rx_msg_byte_{0};
   uint8_t nibble_count_{0};
 
+  // Bufor surowych (przed dekodowaniem Manchester) bajtów bieżącej ramki,
+  // od pierwszego bajtu po słowie synchronizacyjnym do bajtu przed
+  // trailerem — do tymczasowego porównania kodera to_raw_frame() z
+  // rzeczywistą ramką z eteru. Usunąć razem z logowaniem w handle_rx_done().
+  uint8_t rx_raw_capture_[RAMSES_MAX_RAW]{0};
+
   RamsesMessage current_msg_;
   uint8_t msg_parse_state_{0};
   uint8_t msg_field_count_{0};

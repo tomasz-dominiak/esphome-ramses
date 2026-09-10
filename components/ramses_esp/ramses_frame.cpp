@@ -3,6 +3,7 @@
 #include "esphome/core/log.h"
 #include <sys/time.h>
 #include <ctime>
+#include <cstdio>
 
 static const char *TAG = "ramses_esp.frame";
 
@@ -169,6 +170,9 @@ void RamsesFrameHandler::process_rx_byte(uint8_t b) {
         return;
       }
 
+      if (this->rx_raw_count_ < RAMSES_MAX_RAW) {
+        this->rx_raw_capture_[this->rx_raw_count_] = b;
+      }
       this->rx_raw_count_++;
       if (this->rx_raw_count_ >= RAMSES_MAX_RAW) {
         this->rx_state_ = FRM_RX_ABORT;
@@ -284,9 +288,55 @@ void RamsesFrameHandler::handle_rx_done() {
              tv.tv_usec / 1000);
   }
 
+  // TYMCZASOWE: porównanie kodera to_raw_frame() z rzeczywistą ramką z
+  // eteru. Do usunięcia po zdiagnozowaniu, dlaczego centrala ignoruje
+  // ramki nadawane przez to_raw_frame() mimo poprawnej treści/mocy/czasu.
+  {
+    char raw_hex[RAMSES_MAX_RAW * 3 + 1];
+    int pos = 0;
+    for (uint8_t i = 0; i < this->rx_raw_count_ && pos < (int)sizeof(raw_hex) - 3; i++) {
+      pos += snprintf(raw_hex + pos, sizeof(raw_hex) - pos, "%02X ", this->rx_raw_capture_[i]);
+    }
+    ESP_LOGD(TAG, "RX raw body (%u B, po sync/przed trailerem): %s", this->rx_raw_count_, raw_hex);
+  }
+
   if (this->current_msg_.is_valid()) {
     std::string hgi80 = this->current_msg_.to_hgi80();
     ESP_LOGI(TAG, "RX: %s", hgi80.c_str());
+
+    // to_raw_frame() layout: 20 B preambuły (0x55) + 5 B sync + treść
+    // zakodowana Manchesterem + 2 B trailer (0x35, 0x55).
+    std::vector<uint8_t> encoded = this->current_msg_.to_raw_frame();
+    static const size_t PREAMBLE_SYNC_LEN = 25;
+    static const size_t TRAILER_LEN = 2;
+    if (encoded.size() >= PREAMBLE_SYNC_LEN + TRAILER_LEN) {
+      size_t body_len = encoded.size() - PREAMBLE_SYNC_LEN - TRAILER_LEN;
+
+      char enc_hex[RAMSES_MAX_RAW * 3 + 1];
+      int pos = 0;
+      for (size_t i = 0; i < body_len && pos < (int)sizeof(enc_hex) - 3; i++) {
+        pos += snprintf(enc_hex + pos, sizeof(enc_hex) - pos, "%02X ", encoded[PREAMBLE_SYNC_LEN + i]);
+      }
+      ESP_LOGD(TAG, "TX would encode (%u B): %s", (unsigned)body_len, enc_hex);
+
+      if (body_len != this->rx_raw_count_) {
+        ESP_LOGW(TAG, "RX/TX: różna długość ciała ramki — RX=%u B, TX=%u B",
+                 this->rx_raw_count_, (unsigned)body_len);
+      } else {
+        bool mismatch = false;
+        for (uint8_t i = 0; i < this->rx_raw_count_; i++) {
+          uint8_t enc_byte = encoded[PREAMBLE_SYNC_LEN + i];
+          if (this->rx_raw_capture_[i] != enc_byte) {
+            ESP_LOGW(TAG, "RX/TX: bajt %u różny — RX=0x%02X TX=0x%02X", i, this->rx_raw_capture_[i], enc_byte);
+            mismatch = true;
+          }
+        }
+        if (!mismatch) {
+          ESP_LOGD(TAG, "RX/TX: ciało ramki identyczne (%u B)", this->rx_raw_count_);
+        }
+      }
+    }
+
     if (this->on_message_cb_ != nullptr) {
       this->on_message_cb_(this->current_msg_);
     }
