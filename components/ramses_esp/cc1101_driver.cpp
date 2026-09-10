@@ -97,7 +97,7 @@ bool CC1101Driver::init(spi_host_device_t host, gpio_num_t sck, gpio_num_t mosi,
 
   spi_device_interface_config_t devcfg = {};
   devcfg.mode = 0;
-  devcfg.clock_speed_hz = 10000000; // 10 MHz
+  devcfg.clock_speed_hz = 1000000; // 1 MHz
   devcfg.spics_io_num = this->cs_pin_;
   devcfg.flags = SPI_DEVICE_NO_DUMMY;
   devcfg.queue_size = 7;
