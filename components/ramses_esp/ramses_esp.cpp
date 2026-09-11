@@ -1,5 +1,6 @@
 #include "ramses_esp.h"
 #include "esphome/core/log.h"
+#include "esp_task_wdt.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -12,6 +13,24 @@ static const char *const TAG = "ramses_esp";
 
 namespace esphome {
 namespace ramses_esp {
+
+// TYMCZASOWE: brama sweepu diagnostycznego w process_tx_queue() — patrz tam.
+// Dopasowuje TYLKO ramki 22F1 nadawane z 37:220902 do 32:148895; wszystko
+// inne (m.in. sygnaturowy pakiet ramses_cc wysyłany zaraz po connect TCP)
+// ma iść normalną, pojedynczą ścieżką TX bez dotykania FSCTRL0.
+static bool ramses_addr_matches(const uint8_t addr_bytes[3], uint8_t dev_class, uint32_t id) {
+  RamsesAddress addr = RamsesAddress::from_bytes(addr_bytes);
+  return addr.is_valid && addr.dev_class == dev_class && addr.id == id;
+}
+
+static bool is_freq_sweep_target(const RamsesMessage &msg) {
+  if (msg.opcode[0] != 0x22 || msg.opcode[1] != 0xF1) return false;
+  if (!(msg.fields & RAMSES_F_ADDR0) || !ramses_addr_matches(msg.addr[0], 37, 220902)) return false;
+  bool dst_match = false;
+  if (msg.fields & RAMSES_F_ADDR1) dst_match |= ramses_addr_matches(msg.addr[1], 32, 148895);
+  if (msg.fields & RAMSES_F_ADDR2) dst_match |= ramses_addr_matches(msg.addr[2], 32, 148895);
+  return dst_match;
+}
 
 void RamsesESPComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up RAMSES ESP component...");
@@ -279,30 +298,41 @@ void RamsesESPComponent::process_tx_queue() {
   RamsesMessage tx_msg;
   if (this->tx_msg_queue_ != nullptr && xQueueReceive(this->tx_msg_queue_, &tx_msg, 0) == pdTRUE) {
     if (xSemaphoreTake(this->radio_mutex_, pdMS_TO_TICKS(200)) == pdTRUE) {
-      // TYMCZASOWE: tryb diagnostyczny — każda wysyłka z kolejki TX jest
-      // powtarzana przy 31 offsetach FSCTRL0 zamiast pojedynczej transmisji.
-      // Do cofnięcia po zakończeniu testów (przywrócić pojedyncze wywołanie
-      // transmit_message_locked(tx_msg)).
-      static const int TX_SWEEP_MIN = -120;
-      static const int TX_SWEEP_MAX = 120;
-      static const int TX_SWEEP_STEP = 8;
+      if (!is_freq_sweep_target(tx_msg)) {
+        this->transmit_message_locked(tx_msg);
+      } else {
+        // TYMCZASOWE: tryb diagnostyczny — tylko dla 22F1 37:220902 ->
+        // 32:148895. Do cofnięcia po zakończeniu testów (przywrócić
+        // pojedyncze wywołanie transmit_message_locked(tx_msg) powyżej i
+        // usunąć tę gałąź razem z is_freq_sweep_target()).
+        static const int TX_SWEEP_MIN = -120;
+        static const int TX_SWEEP_MAX = 120;
+        static const int TX_SWEEP_STEP = 8;
 
-      bool echoed = false;
-      for (int off = TX_SWEEP_MIN; off <= TX_SWEEP_MAX; off += TX_SWEEP_STEP) {
-        this->cc1101_.write_reg(CC_FSCTRL0, static_cast<uint8_t>(off));
-        ESP_LOGI(TAG, "SWEEP: FSCTRL0=%d (%.1f kHz)", off, off * 1.5869f);
-        // Echo dokładnie raz, zaraz po pierwszej udanej transmisji — inaczej
-        // ramses_cc dostałby 31 ech tej samej ramki i zgłosiłby błąd.
-        bool tx_ok = this->transmit_message_locked(tx_msg, !echoed);
-        if (tx_ok && !echoed) {
-          echoed = true;
+        bool echoed = false;
+        for (int off = TX_SWEEP_MIN; off <= TX_SWEEP_MAX; off += TX_SWEEP_STEP) {
+          // Karmimy Task WDT co iterację — bez tego, przy ~10 s łącznego
+          // czasu pętli, idle task na tym rdzeniu nie dostawał CPU i układ
+          // resetował się po Task WDT (crash w prvIdleTask).
+          esp_task_wdt_reset();
+
+          this->cc1101_.write_reg(CC_FSCTRL0, static_cast<uint8_t>(off));
+          ESP_LOGI(TAG, "SWEEP: FSCTRL0=%d (%.1f kHz)", off, off * 1.5869f);
+          // Echo dokładnie raz, zaraz po pierwszej udanej transmisji — inaczej
+          // ramses_cc dostałby 31 ech tej samej ramki i zgłosiłby błąd.
+          bool tx_ok = this->transmit_message_locked(tx_msg, !echoed);
+          if (tx_ok && !echoed) {
+            echoed = true;
+          }
+          // vTaskDelay (nie aktywne czekanie na millis()) — oddaje CPU
+          // schedulerowi między strzałami.
+          vTaskDelay(pdMS_TO_TICKS(300));
         }
-        vTaskDelay(pdMS_TO_TICKS(400));
-      }
 
-      this->cc1101_.write_reg(CC_FSCTRL0, 0x00);
-      this->cc1101_.enter_rx_mode();
-      this->frame_handler_.rx_enable();
+        this->cc1101_.write_reg(CC_FSCTRL0, 0x00);
+        this->cc1101_.enter_rx_mode();
+        this->frame_handler_.rx_enable();
+      }
 
       xSemaphoreGive(this->radio_mutex_);
     }
