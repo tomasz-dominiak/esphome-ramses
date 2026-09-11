@@ -52,7 +52,7 @@ class RamsesESPComponent : public Component {
   void handle_tcp_clients();
   void broadcast_hgi80(const std::string &hgi80);
   void process_tx_queue();
-  void transmit_message_locked(const RamsesMessage &tx_msg);
+  bool transmit_message_locked(const RamsesMessage &tx_msg, bool echo = true);
 
   static void radio_task_trampoline(void *arg);
   void radio_task();

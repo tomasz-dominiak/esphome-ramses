@@ -215,7 +215,7 @@ bool RamsesESPComponent::send_hgi80_command(const std::string &cmd) {
 // RX. Wołający musi już trzymać radio_mutex_. Współdzielone przez normalną
 // kolejkę TX (process_tx_queue) i akcję diagnostyczną freq_sweep, żeby obie
 // ścieżki nadawały identycznie.
-void RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg) {
+bool RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg, bool echo) {
   ESP_LOGI(TAG, "Transmitting RAMSES packet: %s", tx_msg.to_hgi80().c_str());
 
   this->frame_handler_.rx_disable();
@@ -251,11 +251,14 @@ void RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg) {
   bool tx_ok = this->cc1101_.wait_tx_complete(50);
   if (!tx_ok) {
     ESP_LOGW(TAG, "TX ucięte, echo pominięte: %s", tx_msg.to_hgi80().c_str());
-  } else {
+  } else if (echo) {
     // Echo the transmitted frame back to TCP clients so ramses_tx sees the
     // expected self-echo and can leave its WantEcho state. Wysyłane
     // dopiero po potwierdzonym opróżnieniu FIFO — inaczej log/ramses_tx
     // widziałby poprawną ramkę nawet gdy w eter poleciał tylko urywek.
+    // Wołający z echo=false (patrz process_tx_queue: tryb sweep) sam
+    // decyduje, kiedy echo wysłać, żeby nie zdublować go przy wielu
+    // transmisjach tej samej ramki.
     this->broadcast_hgi80(tx_msg.to_hgi80());
   }
 
@@ -269,13 +272,38 @@ void RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg) {
 
   uint32_t tx_cycle_us = micros() - tx_cycle_start_us;
   ESP_LOGD(TAG, "Cykl STX -> z powrotem w RX: %lu us", (unsigned long)tx_cycle_us);
+  return tx_ok;
 }
 
 void RamsesESPComponent::process_tx_queue() {
   RamsesMessage tx_msg;
   if (this->tx_msg_queue_ != nullptr && xQueueReceive(this->tx_msg_queue_, &tx_msg, 0) == pdTRUE) {
     if (xSemaphoreTake(this->radio_mutex_, pdMS_TO_TICKS(200)) == pdTRUE) {
-      this->transmit_message_locked(tx_msg);
+      // TYMCZASOWE: tryb diagnostyczny — każda wysyłka z kolejki TX jest
+      // powtarzana przy 31 offsetach FSCTRL0 zamiast pojedynczej transmisji.
+      // Do cofnięcia po zakończeniu testów (przywrócić pojedyncze wywołanie
+      // transmit_message_locked(tx_msg)).
+      static const int TX_SWEEP_MIN = -120;
+      static const int TX_SWEEP_MAX = 120;
+      static const int TX_SWEEP_STEP = 8;
+
+      bool echoed = false;
+      for (int off = TX_SWEEP_MIN; off <= TX_SWEEP_MAX; off += TX_SWEEP_STEP) {
+        this->cc1101_.write_reg(CC_FSCTRL0, static_cast<uint8_t>(off));
+        ESP_LOGI(TAG, "SWEEP: FSCTRL0=%d (%.1f kHz)", off, off * 1.5869f);
+        // Echo dokładnie raz, zaraz po pierwszej udanej transmisji — inaczej
+        // ramses_cc dostałby 31 ech tej samej ramki i zgłosiłby błąd.
+        bool tx_ok = this->transmit_message_locked(tx_msg, !echoed);
+        if (tx_ok && !echoed) {
+          echoed = true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(400));
+      }
+
+      this->cc1101_.write_reg(CC_FSCTRL0, 0x00);
+      this->cc1101_.enter_rx_mode();
+      this->frame_handler_.rx_enable();
+
       xSemaphoreGive(this->radio_mutex_);
     }
   }
