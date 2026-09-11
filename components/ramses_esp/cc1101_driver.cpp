@@ -43,7 +43,7 @@ static const uint8_t CC_RAMSES_CFG[CC_PARAM_MAX] = {
     0x07, // CC_MCSM2    default
     0x30, // CC_MCSM1    default
     0x18, // CC_MCSM0    Auto-calibrate on Idle to RX+TX
-    0x16, // CC_FOCCFG   default
+    0x17, // CC_FOCCFG   FOC_LIMIT=BW/2 (było 0x16=BW/4 — FREQEST nasycał się na 42)
     0x6C, // CC_BSCFG    default
     0x43, // CC_AGCCTRL2
     0x40, // CC_AGCCTRL1 default

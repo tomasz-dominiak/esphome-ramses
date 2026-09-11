@@ -296,9 +296,9 @@ void RamsesESPComponent::freq_sweep(const std::string &cmd) {
     return;
   }
 
-  static const int FREQ_SWEEP_MIN = -32;
-  static const int FREQ_SWEEP_MAX = 32;
-  static const int FREQ_SWEEP_STEP = 4;
+  static const int FREQ_SWEEP_MIN = -120;
+  static const int FREQ_SWEEP_MAX = 120;
+  static const int FREQ_SWEEP_STEP = 8;
 
   ESP_LOGI(TAG, "SWEEP: start, ramka=%s", msg.to_hgi80().c_str());
   for (int off = FREQ_SWEEP_MIN; off <= FREQ_SWEEP_MAX; off += FREQ_SWEEP_STEP) {
