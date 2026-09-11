@@ -30,7 +30,7 @@ static const uint8_t CC_RAMSES_CFG[CC_PARAM_MAX] = {
     0x00, // CC_ADDR     default
     0x00, // CC_CHANNR   default
     0x0F, // CC_FSCTRL1  default
-    0x31, // CC_FSCTRL0  AFC +49 (~78 kHz), wg stabilnego odczytu FREQEST po podniesieniu FOC_LIMIT
+    0xCF, // CC_FSCTRL0  AFC -49 (~-78 kHz) — +49 pchało FREQEST na ogranicznik (49+49=98>85), znak odwrotny
     0x21, // CC_FREQ2    868.3 MHz
     0x65, // CC_FREQ1
     0x6A, // CC_FREQ0
