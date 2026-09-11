@@ -211,67 +211,109 @@ bool RamsesESPComponent::send_hgi80_command(const std::string &cmd) {
   return false;
 }
 
+// Pełny cykl nadawania jednej ramki: FIFO, STX, wait_tx_complete, powrót do
+// RX. Wołający musi już trzymać radio_mutex_. Współdzielone przez normalną
+// kolejkę TX (process_tx_queue) i akcję diagnostyczną freq_sweep, żeby obie
+// ścieżki nadawały identycznie.
+void RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg) {
+  ESP_LOGI(TAG, "Transmitting RAMSES packet: %s", tx_msg.to_hgi80().c_str());
+
+  this->frame_handler_.rx_disable();
+  this->cc1101_.enter_idle_mode();
+
+  std::vector<uint8_t> raw_frame = tx_msg.to_raw_frame();
+  this->cc1101_.prepare_tx_mode();
+
+  // Napełniamy TX FIFO PRZED strobem STX — inaczej puste FIFO wywołuje
+  // TXFIFO_UNDERFLOW w czasie jednego bajtu i ramka nigdy nie jest wysłana.
+  size_t sent = 0;
+  size_t preload = std::min<size_t>(64, raw_frame.size());
+  for (; sent < preload; sent++) {
+    this->cc1101_.write_fifo(raw_frame[sent]);
+  }
+
+  uint32_t tx_cycle_start_us = micros();
+  this->cc1101_.start_tx();
+
+  uint32_t start_ms = millis();
+  while (sent < raw_frame.size() && (millis() - start_ms < 500)) {
+    uint8_t space = this->cc1101_.write_fifo(raw_frame[sent++]);
+    if (space < 2) {
+      vTaskDelay(pdMS_TO_TICKS(2));
+    }
+  }
+
+  this->cc1101_.fifo_end();
+  // Czekamy aż FIFO faktycznie się opróżni zamiast na sztywno 15 ms —
+  // dla dłuższych ramek (payload >~40 B) transmisja trwa dłużej niż
+  // 15 ms i była ucinana w połowie, zanim urządzenie zdążyło ją
+  // odebrać, mimo że echo niżej i tak zgłaszało sukces.
+  bool tx_ok = this->cc1101_.wait_tx_complete(50);
+  if (!tx_ok) {
+    ESP_LOGW(TAG, "TX ucięte, echo pominięte: %s", tx_msg.to_hgi80().c_str());
+  } else {
+    // Echo the transmitted frame back to TCP clients so ramses_tx sees the
+    // expected self-echo and can leave its WantEcho state. Wysyłane
+    // dopiero po potwierdzonym opróżnieniu FIFO — inaczej log/ramses_tx
+    // widziałby poprawną ramkę nawet gdy w eter poleciał tylko urywek.
+    this->broadcast_hgi80(tx_msg.to_hgi80());
+  }
+
+  // Powrót do RX bez przepisywania wszystkich 47 rejestrów + PATABLE:
+  // nadawanie zmienia tylko PKTCTRL0 i IOCFG0, a te dwa i tak ustawia
+  // enter_rx_mode(). Skraca to okno głuchoty gateway'a po transmisji —
+  // urządzenia w sieci RAMSES odpowiadają po 16-21 ms, więc każda
+  // dodatkowa milisekunda martwego czasu gubi odpowiedzi.
+  this->cc1101_.enter_rx_mode();
+  this->frame_handler_.rx_enable();
+
+  uint32_t tx_cycle_us = micros() - tx_cycle_start_us;
+  ESP_LOGD(TAG, "Cykl STX -> z powrotem w RX: %lu us", (unsigned long)tx_cycle_us);
+}
+
 void RamsesESPComponent::process_tx_queue() {
   RamsesMessage tx_msg;
   if (this->tx_msg_queue_ != nullptr && xQueueReceive(this->tx_msg_queue_, &tx_msg, 0) == pdTRUE) {
     if (xSemaphoreTake(this->radio_mutex_, pdMS_TO_TICKS(200)) == pdTRUE) {
-      ESP_LOGI(TAG, "Transmitting RAMSES packet: %s", tx_msg.to_hgi80().c_str());
-
-      this->frame_handler_.rx_disable();
-      this->cc1101_.enter_idle_mode();
-
-      std::vector<uint8_t> raw_frame = tx_msg.to_raw_frame();
-      this->cc1101_.prepare_tx_mode();
-
-      // Napełniamy TX FIFO PRZED strobem STX — inaczej puste FIFO wywołuje
-      // TXFIFO_UNDERFLOW w czasie jednego bajtu i ramka nigdy nie jest wysłana.
-      size_t sent = 0;
-      size_t preload = std::min<size_t>(64, raw_frame.size());
-      for (; sent < preload; sent++) {
-        this->cc1101_.write_fifo(raw_frame[sent]);
-      }
-
-      uint32_t tx_cycle_start_us = micros();
-      this->cc1101_.start_tx();
-
-      uint32_t start_ms = millis();
-      while (sent < raw_frame.size() && (millis() - start_ms < 500)) {
-        uint8_t space = this->cc1101_.write_fifo(raw_frame[sent++]);
-        if (space < 2) {
-          vTaskDelay(pdMS_TO_TICKS(2));
-        }
-      }
-
-      this->cc1101_.fifo_end();
-      // Czekamy aż FIFO faktycznie się opróżni zamiast na sztywno 15 ms —
-      // dla dłuższych ramek (payload >~40 B) transmisja trwa dłużej niż
-      // 15 ms i była ucinana w połowie, zanim urządzenie zdążyło ją
-      // odebrać, mimo że echo niżej i tak zgłaszało sukces.
-      bool tx_ok = this->cc1101_.wait_tx_complete(50);
-      if (!tx_ok) {
-        ESP_LOGW(TAG, "TX ucięte, echo pominięte: %s", tx_msg.to_hgi80().c_str());
-      } else {
-        // Echo the transmitted frame back to TCP clients so ramses_tx sees the
-        // expected self-echo and can leave its WantEcho state. Wysyłane
-        // dopiero po potwierdzonym opróżnieniu FIFO — inaczej log/ramses_tx
-        // widziałby poprawną ramkę nawet gdy w eter poleciał tylko urywek.
-        this->broadcast_hgi80(tx_msg.to_hgi80());
-      }
-
-      // Powrót do RX bez przepisywania wszystkich 47 rejestrów + PATABLE:
-      // nadawanie zmienia tylko PKTCTRL0 i IOCFG0, a te dwa i tak ustawia
-      // enter_rx_mode(). Skraca to okno głuchoty gateway'a po transmisji —
-      // urządzenia w sieci RAMSES odpowiadają po 16-21 ms, więc każda
-      // dodatkowa milisekunda martwego czasu gubi odpowiedzi.
-      this->cc1101_.enter_rx_mode();
-      this->frame_handler_.rx_enable();
-
-      uint32_t tx_cycle_us = micros() - tx_cycle_start_us;
-      ESP_LOGD(TAG, "Cykl STX -> z powrotem w RX: %lu us", (unsigned long)tx_cycle_us);
-
+      this->transmit_message_locked(tx_msg);
       xSemaphoreGive(this->radio_mutex_);
     }
   }
+}
+
+// Diagnostyka strojenia CC1101: dla tej samej ramki przemiata FSCTRL0
+// (korekcja częstotliwości nadawania) od -32 do +32 co 4, nadając po każdej
+// zmianie zwykłą ścieżką TX. Po zakończeniu przywraca FSCTRL0 = 0x00.
+void RamsesESPComponent::freq_sweep(const std::string &cmd) {
+  RamsesMessage msg;
+  if (!msg.from_hgi80(cmd)) {
+    ESP_LOGW(TAG, "freq_sweep: nieprawidłowy format komendy HGI80: %s", cmd.c_str());
+    return;
+  }
+
+  if (xSemaphoreTake(this->radio_mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    ESP_LOGW(TAG, "freq_sweep: nie udało się przejąć radia, pomijam sweep");
+    return;
+  }
+
+  static const int FREQ_SWEEP_MIN = -32;
+  static const int FREQ_SWEEP_MAX = 32;
+  static const int FREQ_SWEEP_STEP = 4;
+
+  ESP_LOGI(TAG, "SWEEP: start, ramka=%s", msg.to_hgi80().c_str());
+  for (int off = FREQ_SWEEP_MIN; off <= FREQ_SWEEP_MAX; off += FREQ_SWEEP_STEP) {
+    this->cc1101_.write_reg(CC_FSCTRL0, static_cast<uint8_t>(off));
+    ESP_LOGI(TAG, "SWEEP: FSCTRL0=%d (%.1f kHz)", off, off * 1.5869f);
+    this->transmit_message_locked(msg);
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+
+  this->cc1101_.write_reg(CC_FSCTRL0, 0x00);
+  this->cc1101_.enter_rx_mode();
+  this->frame_handler_.rx_enable();
+  ESP_LOGI(TAG, "SWEEP: koniec, FSCTRL0 przywrócone do 0x00");
+
+  xSemaphoreGive(this->radio_mutex_);
 }
 
 void RamsesESPComponent::dump_config() {

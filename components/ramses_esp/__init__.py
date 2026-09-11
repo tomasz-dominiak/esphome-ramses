@@ -16,6 +16,7 @@ RamsesESPComponent = ramses_esp_ns.class_("RamsesESPComponent", cg.Component)
 
 # Actions
 SendHgi80Action = ramses_esp_ns.class_("SendHgi80Action", automation.Action)
+FreqSweepAction = ramses_esp_ns.class_("FreqSweepAction", automation.Action)
 
 # Triggers
 RamsesMessageTrigger = ramses_esp_ns.class_(
@@ -98,6 +99,29 @@ RAMSES_SEND_HGI80_SCHEMA = cv.Schema(
     synchronous=True,
 )
 async def ramses_send_hgi80_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, paren)
+    template_ = await cg.templatable(config[CONF_COMMAND], args, cg.std_string)
+    cg.add(var.set_command(template_))
+    return var
+
+
+# Action: ramses_esp.freq_sweep
+RAMSES_FREQ_SWEEP_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.use_id(RamsesESPComponent),
+        cv.Required(CONF_COMMAND): cv.templatable(cv.string),
+    }
+)
+
+
+@automation.register_action(
+    "ramses_esp.freq_sweep",
+    FreqSweepAction,
+    RAMSES_FREQ_SWEEP_SCHEMA,
+    synchronous=True,
+)
+async def ramses_freq_sweep_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, paren)
     template_ = await cg.templatable(config[CONF_COMMAND], args, cg.std_string)

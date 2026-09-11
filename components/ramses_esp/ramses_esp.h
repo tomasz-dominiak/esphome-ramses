@@ -40,6 +40,7 @@ class RamsesESPComponent : public Component {
 
   // High-level Actions
   bool send_hgi80_command(const std::string &cmd);
+  void freq_sweep(const std::string &cmd);
 
   // Multiplexer arbitration interface
   void pause();
@@ -51,6 +52,7 @@ class RamsesESPComponent : public Component {
   void handle_tcp_clients();
   void broadcast_hgi80(const std::string &hgi80);
   void process_tx_queue();
+  void transmit_message_locked(const RamsesMessage &tx_msg);
 
   static void radio_task_trampoline(void *arg);
   void radio_task();
@@ -89,6 +91,21 @@ class SendHgi80Action : public Action<Ts...> {
   void play(Ts... x) override {
     auto cmd = this->command_.value(x...);
     this->parent_->send_hgi80_command(cmd);
+  }
+
+ protected:
+  RamsesESPComponent *parent_;
+};
+
+template<typename... Ts>
+class FreqSweepAction : public Action<Ts...> {
+ public:
+  FreqSweepAction(RamsesESPComponent *parent) : parent_(parent) {}
+  TEMPLATABLE_VALUE(std::string, command)
+
+  void play(Ts... x) override {
+    auto cmd = this->command_.value(x...);
+    this->parent_->freq_sweep(cmd);
   }
 
  protected:

@@ -388,6 +388,13 @@ void RamsesFrameHandler::handle_rx_done() {
     std::string hgi80 = this->current_msg_.to_hgi80();
     ESP_LOGI(TAG, "RX: %s", hgi80.c_str());
 
+    // Odczyt korekcji częstotliwości (FREQEST) jeszcze zanim radio opuści RX
+    // przy tej ramce — diagnostyka rozstrojenia lokalnego oscylatora.
+    if (this->cc1101_ != nullptr) {
+      int8_t freqest = this->cc1101_->read_freqest();
+      ESP_LOGD(TAG, "FREQEST: %d (%.1f kHz)", (int)freqest, freqest * 1.5869f);
+    }
+
     // to_raw_frame() layout: RAMSES_TX_PREAMBLE_LEN B preambuły (0x55) +
     // 5 B sync + treść zakodowana Manchesterem + RAMSES_TX_TRAILER_LEN B
     // trailera. Sync ma stałą długość 5 (FF 00 33 55 53), nie ma osobnej

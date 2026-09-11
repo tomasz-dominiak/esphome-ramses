@@ -298,6 +298,21 @@ uint8_t CC1101Driver::read_rssi() {
   return static_cast<uint8_t>(-rssi);
 }
 
+// FREQEST (0x32) to rejestr statusowy — jak TXBYTES, odczyt musi mieć bit
+// burst ustawiony (zaszyty w CC_FREQEST), a erratum TI każe czytać dwa razy
+// i akceptować dopiero zgodne kolejne wartości.
+int8_t CC1101Driver::read_freqest() {
+  uint8_t a = this->read_reg(CC_FREQEST);
+  uint8_t b = this->read_reg(CC_FREQEST);
+  uint8_t tries = 0;
+  while (a != b && tries < 10) {
+    a = b;
+    b = this->read_reg(CC_FREQEST);
+    tries++;
+  }
+  return static_cast<int8_t>(b);
+}
+
 void CC1101Driver::apply_ramses_config() {
   this->enter_idle_mode();
   for (uint8_t i = 0; i < CC_PARAM_MAX; i++) {

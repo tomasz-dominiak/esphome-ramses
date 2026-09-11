@@ -38,6 +38,7 @@ class CC1101Driver {
   void fifo_end();
   bool wait_tx_complete(uint32_t timeout_ms);
   uint8_t read_rssi();
+  int8_t read_freqest();
 
   void apply_ramses_config();
   void apply_custom_tx_config(const CustomTxConfig &cfg);
