@@ -1,6 +1,7 @@
 #include "ramses_esp.h"
 #include "esphome/core/log.h"
 #include "esp_task_wdt.h"
+#include "esp_rom_sys.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -257,8 +258,16 @@ bool RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg, bo
   uint32_t start_ms = millis();
   while (sent < raw_frame.size() && (millis() - start_ms < 500)) {
     uint8_t space = this->cc1101_.write_fifo(raw_frame[sent++]);
-    if (space < 2) {
-      vTaskDelay(pdMS_TO_TICKS(2));
+    // TXFIFO (64 B) przy 38,4 kBd drenuje się w ~208 us/bajt — pełny bufor
+    // daje ~13 ms zapasu. Gdy prawie pełny, trzeba tylko poczekać, aż
+    // radio zwolni jeden bajt (~208 us), a NIE oddawać CPU schedulerowi:
+    // vTaskDelay() tutaj czekał "co najmniej" 1-2 znaczniki (1-2 ms przy
+    // domyślnym ticku 1 ms) i przy współbieżnym ruchu Wi-Fi/TCP faktyczny
+    // czas potrafił być dłuższy, zjadając margines bufora — stąd
+    // TXFIFO_UNDERFLOW w ~12% nadań. Krótkie zajęte oczekiwanie (jak
+    // reszta sterownika, patrz cc1101_driver.cpp) usuwa to ryzyko.
+    if (space < 4) {
+      esp_rom_delay_us(200);
     }
   }
 

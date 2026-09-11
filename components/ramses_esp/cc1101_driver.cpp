@@ -68,9 +68,9 @@ static const uint8_t CC_RAMSES_CFG[CC_PARAM_MAX] = {
 };
 
 // FREND0.PA_POWER = 0, więc układ używa wyłącznie PATABLE[0].
-// 0x8E = 0 dBm wg tabeli mocy TI dla 868 MHz.
+// 0xC0 = maksimum wg tabeli mocy TI dla 868 MHz, ok. +11 dBm.
 static const uint8_t CC_DEFAULT_PA[CC_PA_MAX] = {
-    0x8E, 0, 0, 0, 0, 0, 0, 0
+    0xC0, 0, 0, 0, 0, 0, 0, 0
 };
 
 bool CC1101Driver::init(spi_host_device_t host, gpio_num_t sck, gpio_num_t mosi, gpio_num_t miso, gpio_num_t cs) {
