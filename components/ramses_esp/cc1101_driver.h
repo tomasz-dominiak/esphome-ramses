@@ -55,6 +55,10 @@ class CC1101Driver {
   gpio_num_t mosi_pin_{GPIO_NUM_NC};
   gpio_num_t miso_pin_{GPIO_NUM_NC};
   gpio_num_t cs_pin_{GPIO_NUM_NC};
+
+  // Ile razy wait_tx_complete() zakończyło nadawanie przez oczekiwany
+  // TX FIFO underflow (jak w evofw3) zamiast czystego TXBYTES==0.
+  uint32_t tx_underflow_end_count_{0};
 };
 
 } // namespace ramses_esp

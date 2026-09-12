@@ -277,6 +277,16 @@ bool RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg, bo
   // 15 ms i była ucinana w połowie, zanim urządzenie zdążyło ją
   // odebrać, mimo że echo niżej i tak zgłaszało sukces.
   bool tx_ok = this->cc1101_.wait_tx_complete(50);
+  if (tx_ok) {
+    // TXBYTES==0 (albo underflow) oznacza, że modulator pobrał ostatni
+    // bajt z FIFO — jego fizyczne wypromieniowanie trwa jeszcze do
+    // jednego okresu bajtu (8 bitów / 38 383 Bd = ~208 us). SIDLE tuż
+    // po tym ucinałoby ogon ramki, niewidocznie dla nas, a dla
+    // odbiorcy jako zła suma kontrolna. 300 us to pełny okres bajtu z
+    // zapasem. esp_rom_delay_us, nie vTaskDelay — nie może tego
+    // wywłaszczyć scheduler.
+    esp_rom_delay_us(300);
+  }
   if (!tx_ok) {
     ESP_LOGW(TAG, "TX ucięte, echo pominięte: %s", tx_msg.to_hgi80().c_str());
   } else if (echo) {
@@ -426,6 +436,9 @@ void RamsesESPComponent::dump_config() {
   uint8_t frend1 = this->cc1101_.read_reg(CC_FREND1);
   uint8_t frend0 = this->cc1101_.read_reg(CC_FREND0);
   uint8_t pktctrl0 = this->cc1101_.read_reg(CC_PKTCTRL0);
+  uint8_t iocfg0 = this->cc1101_.read_reg(CC_IOCFG0);
+  uint8_t iocfg1 = this->cc1101_.read_reg(CC_IOCFG1);
+  uint8_t iocfg2 = this->cc1101_.read_reg(CC_IOCFG2);
   uint8_t patable0 = this->cc1101_.read_reg(CC_PATABLE | CC_BURST);
 
   uint32_t freq_word = (static_cast<uint32_t>(freq2) << 16) |
@@ -442,6 +455,8 @@ void RamsesESPComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  AGCCTRL2/1/0=0x%02X/0x%02X/0x%02X", agcctrl2, agcctrl1, agcctrl0);
   ESP_LOGCONFIG(TAG, "  FREND1=0x%02X FREND0=0x%02X", frend1, frend0);
   ESP_LOGCONFIG(TAG, "  PKTCTRL0=0x%02X", pktctrl0);
+  ESP_LOGCONFIG(TAG, "  IOCFG2/1/0=0x%02X/0x%02X/0x%02X (GDO2/GDO1/GDO0, stan spoczynku)",
+                iocfg2, iocfg1, iocfg0);
   ESP_LOGCONFIG(TAG, "  PATABLE[0] (burst)=0x%02X", patable0);
   ESP_LOGCONFIG(TAG, "  BUILD: readback-v1");
 }

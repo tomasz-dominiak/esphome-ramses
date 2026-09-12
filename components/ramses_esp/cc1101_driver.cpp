@@ -246,7 +246,7 @@ void CC1101Driver::prepare_tx_mode() {
   }
 
   this->write_reg(CC_PKTCTRL0, 0x02); // Fifo mode, infinite packet
-  this->write_reg(CC_IOCFG0, 0x03);   // Falling edge, TX Fifo low
+  this->write_reg(CC_IOCFG0, 0x02);   // Falling edge, TX Fifo low (jak evofw3 — 0x03 to TX_FIFO_FULL, nie THR)
   this->strobe(CC_SFTX);
 }
 
@@ -297,9 +297,16 @@ bool CC1101Driver::wait_tx_complete(uint32_t timeout_ms) {
     uint8_t b = this->read_reg(CC_TXBYTES);
     if (a == b) {
       if (a & 0x80) {
-        ESP_LOGW(TAG, "wait_tx_complete: TX FIFO underflow — awaryjny SFTX");
+        // Jak w evofw3 (cc1101.c/uart.c): po fifo_end() nic już nie
+        // dokłada się do FIFO, więc underflow oznacza, że modulator
+        // sięgnął po kolejny bajt dopiero PO wysłaniu ostatniego —
+        // to oczekiwany, wiarygodny sygnał końca nadawania, nie awaria.
+        // SFTX i tak jest wymagany, żeby wyjść ze stanu TX_UNDERFLOW.
+        this->tx_underflow_end_count_++;
+        ESP_LOGD(TAG, "wait_tx_complete: TX zakończone przez underflow (oczekiwane), licznik=%lu",
+                 (unsigned long)this->tx_underflow_end_count_);
         this->strobe(CC_SFTX);
-        return false;
+        return true;
       }
       if ((a & 0x7F) == 0) {
         return true;
