@@ -227,6 +227,24 @@ void CC1101Driver::prepare_tx_mode() {
   // wywołuje TXFIFO_UNDERFLOW w czasie jednego bajtu i żadna ramka nie
   // trafia w eter.
   this->enter_idle_mode();
+
+  // Jawna kalibracja PLL przed każdym nadaniem. MCSM0.FS_AUTOCAL=01
+  // (idle->TX/RX) powinien kalibrować automatycznie, ale wymuszamy to
+  // też explicit SCAL i czekamy na powrót do IDLE po MARCSTATE, żeby mieć
+  // pewność że synteza częstotliwości jest przekalibrowana zanim FIFO
+  // zostanie napełnione i padnie STX.
+  this->strobe(CC_SCAL);
+  const uint32_t cal_start = millis();
+  uint8_t marcstate = this->read_reg(CC_MARCSTATE);
+  while (marcstate != CC_MARCSTATE_IDLE) {
+    if (millis() - cal_start > CC_STATE_TIMEOUT_MS) {
+      ESP_LOGW(TAG, "prepare_tx_mode: timeout kalibracji SCAL, MARCSTATE=0x%02X", marcstate);
+      break;
+    }
+    delayMicroseconds(10);
+    marcstate = this->read_reg(CC_MARCSTATE);
+  }
+
   this->write_reg(CC_PKTCTRL0, 0x02); // Fifo mode, infinite packet
   this->write_reg(CC_IOCFG0, 0x03);   // Falling edge, TX Fifo low
   this->strobe(CC_SFTX);
@@ -246,6 +264,9 @@ void CC1101Driver::start_tx() {
     delayMicroseconds(10);
     state = CC_STATE(this->strobe(CC_STX));
   }
+  uint8_t marcstate = this->read_reg(CC_MARCSTATE);
+  ESP_LOGI(TAG, "start_tx: MARCSTATE po STX = 0x%02X (oczekiwane 0x%02X = TX)",
+           marcstate, CC_MARCSTATE_TX);
 }
 
 void CC1101Driver::fifo_end() {
@@ -292,8 +313,21 @@ bool CC1101Driver::wait_tx_complete(uint32_t timeout_ms) {
   }
 }
 
+// RSSI (0x34) to rejestr statusowy — jak TXBYTES i FREQEST, odczyt musi mieć
+// bit burst ustawiony (zaszyty w CC_RSSI) i erratum TI każe czytać dwa razy,
+// akceptując dopiero zgodne kolejne wartości. Bez tego ta sama ramka
+// nadawana wielokrotnie dawała odczyty bimodalne (np. na przemian ~16 i
+// ~83) — nie szum sygnału, tylko chwilowo niespójny odczyt rejestru.
 uint8_t CC1101Driver::read_rssi() {
-  int8_t rssi = static_cast<int8_t>(this->read_reg(CC_RSSI));
+  uint8_t a = this->read_reg(CC_RSSI);
+  uint8_t b = this->read_reg(CC_RSSI);
+  uint8_t tries = 0;
+  while (a != b && tries < 10) {
+    a = b;
+    b = this->read_reg(CC_RSSI);
+    tries++;
+  }
+  int8_t rssi = static_cast<int8_t>(b);
   rssi = rssi / 2 - 74;
   return static_cast<uint8_t>(-rssi);
 }
@@ -330,6 +364,50 @@ void CC1101Driver::apply_ramses_config() {
   this->enter_rx_mode();
   ESP_LOGI(TAG, "CC1101 configured for RAMSES II RX (868.3 MHz), PA=0x%02X",
            CC_DEFAULT_PA[0]);
+
+  // Odczyt zwrotny z układu (nie z tablicy CC_RAMSES_CFG w RAM) — weryfikuje,
+  // że zapis po SPI faktycznie doszedł i wylądował tam, gdzie zakładamy.
+  this->log_current_config();
+}
+
+// Czyta z układu (nie z CC_RAMSES_CFG w RAM) i loguje kluczowe rejestry po
+// apply_ramses_config(), żeby potwierdzić że zapis po SPI faktycznie doszedł.
+void CC1101Driver::log_current_config() {
+  uint8_t freq2 = this->read_reg(CC_FREQ2);
+  uint8_t freq1 = this->read_reg(CC_FREQ1);
+  uint8_t freq0 = this->read_reg(CC_FREQ0);
+  uint8_t fsctrl1 = this->read_reg(CC_FSCTRL1);
+  uint8_t fsctrl0 = this->read_reg(CC_FSCTRL0);
+  uint8_t mdmcfg4 = this->read_reg(CC_MDMCFG4);
+  uint8_t mdmcfg3 = this->read_reg(CC_MDMCFG3);
+  uint8_t mdmcfg2 = this->read_reg(CC_MDMCFG2);
+  uint8_t deviatn = this->read_reg(CC_DEVIATN);
+  uint8_t mcsm1 = this->read_reg(CC_MCSM1);
+  uint8_t mcsm0 = this->read_reg(CC_MCSM0);
+  uint8_t foccfg = this->read_reg(CC_FOCCFG);
+  uint8_t agcctrl2 = this->read_reg(CC_AGCCTRL2);
+  uint8_t agcctrl1 = this->read_reg(CC_AGCCTRL1);
+  uint8_t agcctrl0 = this->read_reg(CC_AGCCTRL0);
+  uint8_t frend1 = this->read_reg(CC_FREND1);
+  uint8_t frend0 = this->read_reg(CC_FREND0);
+  uint8_t pktctrl0 = this->read_reg(CC_PKTCTRL0);
+  uint8_t patable0 = this->read_reg(CC_PATABLE | CC_BURST);
+
+  uint32_t freq_word = (static_cast<uint32_t>(freq2) << 16) |
+                        (static_cast<uint32_t>(freq1) << 8) | freq0;
+  double freq_hz = (26000000.0 / 65536.0) * freq_word;
+
+  ESP_LOGI(TAG, "Odczyt zwrotny rejestrow z ukladu:");
+  ESP_LOGI(TAG, "  FREQ2/1/0=0x%02X/0x%02X/0x%02X -> f=%.4f MHz",
+           freq2, freq1, freq0, freq_hz / 1e6);
+  ESP_LOGI(TAG, "  FSCTRL1=0x%02X FSCTRL0=0x%02X", fsctrl1, fsctrl0);
+  ESP_LOGI(TAG, "  MDMCFG4/3/2=0x%02X/0x%02X/0x%02X", mdmcfg4, mdmcfg3, mdmcfg2);
+  ESP_LOGI(TAG, "  DEVIATN=0x%02X MCSM1=0x%02X MCSM0=0x%02X", deviatn, mcsm1, mcsm0);
+  ESP_LOGI(TAG, "  FOCCFG=0x%02X", foccfg);
+  ESP_LOGI(TAG, "  AGCCTRL2/1/0=0x%02X/0x%02X/0x%02X", agcctrl2, agcctrl1, agcctrl0);
+  ESP_LOGI(TAG, "  FREND1=0x%02X FREND0=0x%02X", frend1, frend0);
+  ESP_LOGI(TAG, "  PKTCTRL0=0x%02X", pktctrl0);
+  ESP_LOGI(TAG, "  PATABLE[0] (burst)=0x%02X", patable0);
 }
 
 void CC1101Driver::apply_custom_tx_config(const CustomTxConfig &cfg) {

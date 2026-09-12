@@ -107,3 +107,8 @@
 #define CC_STATE_SETTLING 0x50
 #define CC_STATE_RX_OVERFLOW 0x60
 #define CC_STATE_TX_UNDERFLOW 0x70
+
+// MARCSTATE (0x35, burst) — pelny automat stanow, nie mylic z 3-bitowym
+// polem STATE w bajcie statusu powyzej.
+#define CC_MARCSTATE_IDLE 0x01
+#define CC_MARCSTATE_TX 0x13
