@@ -347,6 +347,13 @@ int8_t CC1101Driver::read_freqest() {
   return static_cast<int8_t>(b);
 }
 
+// Wartość rejestru CC_RAMSES_CFG (tabela konfiguracyjna w RAM) dla danego
+// adresu — do przywracania pojedynczego rejestru po diagnostycznym sweepie
+// bez ponownego przepisywania wszystkich 47 rejestrów.
+uint8_t CC1101Driver::get_default_reg(uint8_t addr) {
+  return (addr < CC_PARAM_MAX) ? CC_RAMSES_CFG[addr] : 0;
+}
+
 void CC1101Driver::apply_ramses_config() {
   this->enter_idle_mode();
   for (uint8_t i = 0; i < CC_PARAM_MAX; i++) {

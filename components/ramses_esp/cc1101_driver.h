@@ -42,6 +42,7 @@ class CC1101Driver {
 
   void apply_ramses_config();
   void apply_custom_tx_config(const CustomTxConfig &cfg);
+  uint8_t get_default_reg(uint8_t addr);
 
  protected:
   void spi_reset();

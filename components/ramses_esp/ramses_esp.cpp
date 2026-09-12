@@ -314,31 +314,39 @@ void RamsesESPComponent::process_tx_queue() {
         // 32:148895. Do cofnięcia po zakończeniu testów (przywrócić
         // pojedyncze wywołanie transmit_message_locked(tx_msg) powyżej i
         // usunąć tę gałąź razem z is_freq_sweep_target()).
-        static const int TX_SWEEP_MIN = -120;
-        static const int TX_SWEEP_MAX = 120;
-        static const int TX_SWEEP_STEP = 8;
+        //
+        // Przemiata DEVIATN (0x15), nie FSCTRL0 — FSCTRL0 zostaje na 0x00.
+        static const uint8_t DEVIATN_SWEEP[] = {
+            0x30, 0x34, 0x38, 0x3C, 0x40, 0x43, 0x45, 0x47, 0x50,
+            0x53, 0x55, 0x57, 0x60, 0x63, 0x65, 0x67, 0x70,
+        };
 
         bool echoed = false;
-        for (int off = TX_SWEEP_MIN; off <= TX_SWEEP_MAX; off += TX_SWEEP_STEP) {
+        for (uint8_t dev_reg : DEVIATN_SWEEP) {
           // Karmimy Task WDT co iterację — bez tego, przy ~10 s łącznego
           // czasu pętli, idle task na tym rdzeniu nie dostawał CPU i układ
           // resetował się po Task WDT (crash w prvIdleTask).
           esp_task_wdt_reset();
 
-          this->cc1101_.write_reg(CC_FSCTRL0, static_cast<uint8_t>(off));
-          ESP_LOGI(TAG, "SWEEP: FSCTRL0=%d (%.1f kHz)", off, off * 1.5869f);
+          this->cc1101_.write_reg(CC_DEVIATN, dev_reg);
+          // dev = 26e6 / 2^17 * (8 + DEVIATION_M) * 2^DEVIATION_E
+          // DEVIATION_E = bity 6:4, DEVIATION_M = bity 2:0.
+          uint8_t dev_e = (dev_reg >> 4) & 0x07;
+          uint8_t dev_m = dev_reg & 0x07;
+          float dev_hz = (26000000.0f / 131072.0f) * (8 + dev_m) * (1 << dev_e);
+          ESP_LOGI(TAG, "SWEEP: DEVIATN=0x%02X (dev=%.2f kHz)", dev_reg, dev_hz / 1000.0f);
           // Echo dokładnie raz, zaraz po pierwszej udanej transmisji — inaczej
-          // ramses_cc dostałby 31 ech tej samej ramki i zgłosiłby błąd.
+          // ramses_cc dostałby 17 ech tej samej ramki i zgłosiłby błąd.
           bool tx_ok = this->transmit_message_locked(tx_msg, !echoed);
           if (tx_ok && !echoed) {
             echoed = true;
           }
           // vTaskDelay (nie aktywne czekanie na millis()) — oddaje CPU
           // schedulerowi między strzałami.
-          vTaskDelay(pdMS_TO_TICKS(300));
+          vTaskDelay(pdMS_TO_TICKS(400));
         }
 
-        this->cc1101_.write_reg(CC_FSCTRL0, 0x00);
+        this->cc1101_.write_reg(CC_DEVIATN, this->cc1101_.get_default_reg(CC_DEVIATN));
         this->cc1101_.enter_rx_mode();
         this->frame_handler_.rx_enable();
       }
