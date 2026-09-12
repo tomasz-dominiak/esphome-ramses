@@ -265,8 +265,10 @@ void CC1101Driver::start_tx() {
     state = CC_STATE(this->strobe(CC_STX));
   }
   uint8_t marcstate = this->read_reg(CC_MARCSTATE);
-  ESP_LOGI(TAG, "start_tx: MARCSTATE po STX = 0x%02X (oczekiwane 0x%02X = TX)",
-           marcstate, CC_MARCSTATE_TX);
+  uint8_t pktctrl0 = this->read_reg(CC_PKTCTRL0);
+  uint8_t pktlen = this->read_reg(CC_PKTLEN);
+  ESP_LOGI(TAG, "start_tx: MARCSTATE po STX = 0x%02X (oczekiwane 0x%02X = TX), PKTCTRL0=0x%02X, PKTLEN=0x%02X",
+           marcstate, CC_MARCSTATE_TX, pktctrl0, pktlen);
 }
 
 void CC1101Driver::fifo_end() {
