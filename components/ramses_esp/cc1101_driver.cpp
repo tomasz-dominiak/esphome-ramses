@@ -364,50 +364,6 @@ void CC1101Driver::apply_ramses_config() {
   this->enter_rx_mode();
   ESP_LOGI(TAG, "CC1101 configured for RAMSES II RX (868.3 MHz), PA=0x%02X",
            CC_DEFAULT_PA[0]);
-
-  // Odczyt zwrotny z układu (nie z tablicy CC_RAMSES_CFG w RAM) — weryfikuje,
-  // że zapis po SPI faktycznie doszedł i wylądował tam, gdzie zakładamy.
-  this->log_current_config();
-}
-
-// Czyta z układu (nie z CC_RAMSES_CFG w RAM) i loguje kluczowe rejestry po
-// apply_ramses_config(), żeby potwierdzić że zapis po SPI faktycznie doszedł.
-void CC1101Driver::log_current_config() {
-  uint8_t freq2 = this->read_reg(CC_FREQ2);
-  uint8_t freq1 = this->read_reg(CC_FREQ1);
-  uint8_t freq0 = this->read_reg(CC_FREQ0);
-  uint8_t fsctrl1 = this->read_reg(CC_FSCTRL1);
-  uint8_t fsctrl0 = this->read_reg(CC_FSCTRL0);
-  uint8_t mdmcfg4 = this->read_reg(CC_MDMCFG4);
-  uint8_t mdmcfg3 = this->read_reg(CC_MDMCFG3);
-  uint8_t mdmcfg2 = this->read_reg(CC_MDMCFG2);
-  uint8_t deviatn = this->read_reg(CC_DEVIATN);
-  uint8_t mcsm1 = this->read_reg(CC_MCSM1);
-  uint8_t mcsm0 = this->read_reg(CC_MCSM0);
-  uint8_t foccfg = this->read_reg(CC_FOCCFG);
-  uint8_t agcctrl2 = this->read_reg(CC_AGCCTRL2);
-  uint8_t agcctrl1 = this->read_reg(CC_AGCCTRL1);
-  uint8_t agcctrl0 = this->read_reg(CC_AGCCTRL0);
-  uint8_t frend1 = this->read_reg(CC_FREND1);
-  uint8_t frend0 = this->read_reg(CC_FREND0);
-  uint8_t pktctrl0 = this->read_reg(CC_PKTCTRL0);
-  uint8_t patable0 = this->read_reg(CC_PATABLE | CC_BURST);
-
-  uint32_t freq_word = (static_cast<uint32_t>(freq2) << 16) |
-                        (static_cast<uint32_t>(freq1) << 8) | freq0;
-  double freq_hz = (26000000.0 / 65536.0) * freq_word;
-
-  ESP_LOGI(TAG, "Odczyt zwrotny rejestrow z ukladu:");
-  ESP_LOGI(TAG, "  FREQ2/1/0=0x%02X/0x%02X/0x%02X -> f=%.4f MHz",
-           freq2, freq1, freq0, freq_hz / 1e6);
-  ESP_LOGI(TAG, "  FSCTRL1=0x%02X FSCTRL0=0x%02X", fsctrl1, fsctrl0);
-  ESP_LOGI(TAG, "  MDMCFG4/3/2=0x%02X/0x%02X/0x%02X", mdmcfg4, mdmcfg3, mdmcfg2);
-  ESP_LOGI(TAG, "  DEVIATN=0x%02X MCSM1=0x%02X MCSM0=0x%02X", deviatn, mcsm1, mcsm0);
-  ESP_LOGI(TAG, "  FOCCFG=0x%02X", foccfg);
-  ESP_LOGI(TAG, "  AGCCTRL2/1/0=0x%02X/0x%02X/0x%02X", agcctrl2, agcctrl1, agcctrl0);
-  ESP_LOGI(TAG, "  FREND1=0x%02X FREND0=0x%02X", frend1, frend0);
-  ESP_LOGI(TAG, "  PKTCTRL0=0x%02X", pktctrl0);
-  ESP_LOGI(TAG, "  PATABLE[0] (burst)=0x%02X", patable0);
 }
 
 void CC1101Driver::apply_custom_tx_config(const CustomTxConfig &cfg) {

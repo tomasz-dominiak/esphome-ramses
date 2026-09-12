@@ -395,6 +395,47 @@ void RamsesESPComponent::dump_config() {
   }
   ESP_LOGCONFIG(TAG, "  UART Port: UART%d", this->uart_num_);
   ESP_LOGCONFIG(TAG, "  TCP Server Port: %u", this->port_);
+
+  // Odczyt zwrotny rejestrów CC1101 z układu (nie z tablicy CC_RAMSES_CFG w
+  // RAM) — logowany tutaj, a nie z setup(), bo klient API podłącza się
+  // dopiero po starcie i tylko blok [C] (dump_config) jest buforowany oraz
+  // wysyłany po podłączeniu; ESP_LOGI z fazy setup() nigdy by nie dotarł.
+  uint8_t freq2 = this->cc1101_.read_reg(CC_FREQ2);
+  uint8_t freq1 = this->cc1101_.read_reg(CC_FREQ1);
+  uint8_t freq0 = this->cc1101_.read_reg(CC_FREQ0);
+  uint8_t fsctrl1 = this->cc1101_.read_reg(CC_FSCTRL1);
+  uint8_t fsctrl0 = this->cc1101_.read_reg(CC_FSCTRL0);
+  uint8_t mdmcfg4 = this->cc1101_.read_reg(CC_MDMCFG4);
+  uint8_t mdmcfg3 = this->cc1101_.read_reg(CC_MDMCFG3);
+  uint8_t mdmcfg2 = this->cc1101_.read_reg(CC_MDMCFG2);
+  uint8_t deviatn = this->cc1101_.read_reg(CC_DEVIATN);
+  uint8_t mcsm1 = this->cc1101_.read_reg(CC_MCSM1);
+  uint8_t mcsm0 = this->cc1101_.read_reg(CC_MCSM0);
+  uint8_t foccfg = this->cc1101_.read_reg(CC_FOCCFG);
+  uint8_t agcctrl2 = this->cc1101_.read_reg(CC_AGCCTRL2);
+  uint8_t agcctrl1 = this->cc1101_.read_reg(CC_AGCCTRL1);
+  uint8_t agcctrl0 = this->cc1101_.read_reg(CC_AGCCTRL0);
+  uint8_t frend1 = this->cc1101_.read_reg(CC_FREND1);
+  uint8_t frend0 = this->cc1101_.read_reg(CC_FREND0);
+  uint8_t pktctrl0 = this->cc1101_.read_reg(CC_PKTCTRL0);
+  uint8_t patable0 = this->cc1101_.read_reg(CC_PATABLE | CC_BURST);
+
+  uint32_t freq_word = (static_cast<uint32_t>(freq2) << 16) |
+                        (static_cast<uint32_t>(freq1) << 8) | freq0;
+  double freq_hz = (26000000.0 / 65536.0) * freq_word;
+
+  ESP_LOGCONFIG(TAG, "  Odczyt zwrotny rejestrow z ukladu:");
+  ESP_LOGCONFIG(TAG, "  FREQ2/1/0=0x%02X/0x%02X/0x%02X -> f=%.4f MHz",
+                freq2, freq1, freq0, freq_hz / 1e6);
+  ESP_LOGCONFIG(TAG, "  FSCTRL1=0x%02X FSCTRL0=0x%02X", fsctrl1, fsctrl0);
+  ESP_LOGCONFIG(TAG, "  MDMCFG4/3/2=0x%02X/0x%02X/0x%02X", mdmcfg4, mdmcfg3, mdmcfg2);
+  ESP_LOGCONFIG(TAG, "  DEVIATN=0x%02X MCSM1=0x%02X MCSM0=0x%02X", deviatn, mcsm1, mcsm0);
+  ESP_LOGCONFIG(TAG, "  FOCCFG=0x%02X", foccfg);
+  ESP_LOGCONFIG(TAG, "  AGCCTRL2/1/0=0x%02X/0x%02X/0x%02X", agcctrl2, agcctrl1, agcctrl0);
+  ESP_LOGCONFIG(TAG, "  FREND1=0x%02X FREND0=0x%02X", frend1, frend0);
+  ESP_LOGCONFIG(TAG, "  PKTCTRL0=0x%02X", pktctrl0);
+  ESP_LOGCONFIG(TAG, "  PATABLE[0] (burst)=0x%02X", patable0);
+  ESP_LOGCONFIG(TAG, "  BUILD: readback-v1");
 }
 
 } // namespace ramses_esp

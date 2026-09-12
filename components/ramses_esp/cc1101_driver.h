@@ -44,7 +44,6 @@ class CC1101Driver {
   void apply_custom_tx_config(const CustomTxConfig &cfg);
 
  protected:
-  void log_current_config();
   void spi_reset();
   bool spi_write_bytes(uint8_t *status, const uint8_t *data, size_t len);
   bool spi_read_bytes(uint8_t *rx_data, const uint8_t *tx_data, size_t len);
