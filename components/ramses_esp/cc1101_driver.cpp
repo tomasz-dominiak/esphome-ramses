@@ -43,7 +43,7 @@ static const uint8_t CC_RAMSES_CFG[CC_PARAM_MAX] = {
     0x07, // CC_MCSM2    default
     0x30, // CC_MCSM1    default
     0x18, // CC_MCSM0    Auto-calibrate on Idle to RX+TX
-    0x17, // CC_FOCCFG   FOC_LIMIT=BW/2 (było 0x16=BW/4 — FREQEST nasycał się na 42)
+    0x16, // CC_FOCCFG   FOC_LIMIT=BW/4
     0x6C, // CC_BSCFG    default
     0x43, // CC_AGCCTRL2
     0x40, // CC_AGCCTRL1 default
@@ -68,9 +68,9 @@ static const uint8_t CC_RAMSES_CFG[CC_PARAM_MAX] = {
 };
 
 // FREND0.PA_POWER = 0, więc układ używa wyłącznie PATABLE[0].
-// 0xC0 = maksimum wg tabeli mocy TI dla 868 MHz, ok. +11 dBm.
+// 0xC3 wg tabeli mocy TI dla 868 MHz, ok. +10 dBm.
 static const uint8_t CC_DEFAULT_PA[CC_PA_MAX] = {
-    0xC0, 0, 0, 0, 0, 0, 0, 0
+    0xC3, 0, 0, 0, 0, 0, 0, 0
 };
 
 bool CC1101Driver::init(spi_host_device_t host, gpio_num_t sck, gpio_num_t mosi, gpio_num_t miso, gpio_num_t cs) {

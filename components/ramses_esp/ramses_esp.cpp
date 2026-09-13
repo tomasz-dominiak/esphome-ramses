@@ -458,7 +458,7 @@ void RamsesESPComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  IOCFG2/1/0=0x%02X/0x%02X/0x%02X (GDO2/GDO1/GDO0, stan spoczynku)",
                 iocfg2, iocfg1, iocfg0);
   ESP_LOGCONFIG(TAG, "  PATABLE[0] (burst)=0x%02X", patable0);
-  ESP_LOGCONFIG(TAG, "  BUILD: readback-v1");
+  ESP_LOGCONFIG(TAG, "  BUILD: readback-v2");
 }
 
 } // namespace ramses_esp
