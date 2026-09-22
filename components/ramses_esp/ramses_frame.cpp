@@ -390,9 +390,22 @@ void RamsesFrameHandler::handle_rx_done() {
 
     // Odczyt korekcji częstotliwości (FREQEST) jeszcze zanim radio opuści RX
     // przy tej ramce — diagnostyka rozstrojenia lokalnego oscylatora.
+    // Średnia z ostatnich N ramek (nie tylko bieżąca próbka) jest tym, co
+    // faktycznie warto wpisać do tx_freq_correction w YAML.
     if (this->cc1101_ != nullptr) {
       int8_t freqest = this->cc1101_->read_freqest();
-      ESP_LOGD(TAG, "FREQEST: %d (%.1f kHz)", (int)freqest, freqest * 1.5869f);
+
+      this->freqest_history_[this->freqest_history_idx_] = freqest;
+      this->freqest_history_idx_ = (this->freqest_history_idx_ + 1) % RAMSES_FREQEST_HISTORY_N;
+      if (this->freqest_history_count_ < RAMSES_FREQEST_HISTORY_N) this->freqest_history_count_++;
+
+      int32_t sum = 0;
+      for (uint8_t i = 0; i < this->freqest_history_count_; i++) sum += this->freqest_history_[i];
+      float avg = static_cast<float>(sum) / this->freqest_history_count_;
+
+      ESP_LOGD(TAG, "FREQEST: %d (%.1f kHz), srednia z ostatnich %u: %.1f (%.1f kHz)",
+               (int)freqest, freqest * 1.5869f, (unsigned)this->freqest_history_count_,
+               avg, avg * 1.5869f);
     }
 
     // to_raw_frame() layout: RAMSES_TX_PREAMBLE_LEN B preambuły (0x55) +

@@ -28,6 +28,10 @@ class RamsesESPComponent : public Component {
   void set_gdo2_pin(InternalGPIOPin *pin) { this->gdo2_pin_ = static_cast<gpio_num_t>(pin->get_pin()); }
   void set_uart_num(uint8_t uart_num) { this->uart_num_ = static_cast<uart_port_t>(uart_num); }
   void set_port(uint16_t port) { this->port_ = port; }
+  // Ręczna korekta FSCTRL0 stosowana tylko na czas TX (RX zawsze zostaje na
+  // 0x00 — patrz komentarz przy CC_FSCTRL0 w cc1101_driver.cpp). Wartość w
+  // jednostkach rejestru, nie kHz — patrz ramses_esp.freq_sweep do przeliczeń.
+  void set_tx_freq_correction(int8_t val) { this->tx_freq_correction_ = val; }
 
   void add_on_message_callback(std::function<void(const std::string &)> callback) {
     this->on_message_callbacks_.push_back(callback);
@@ -52,7 +56,7 @@ class RamsesESPComponent : public Component {
   void handle_tcp_clients();
   void broadcast_hgi80(const std::string &hgi80);
   void process_tx_queue();
-  bool transmit_message_locked(const RamsesMessage &tx_msg, bool echo = true);
+  bool transmit_message_locked(const RamsesMessage &tx_msg);
 
   static void radio_task_trampoline(void *arg);
   void radio_task();
@@ -65,6 +69,7 @@ class RamsesESPComponent : public Component {
   gpio_num_t gdo2_pin_{GPIO_NUM_NC};
   uart_port_t uart_num_{UART_NUM_1};
   uint16_t port_{6638};
+  int8_t tx_freq_correction_{0};
 
   CC1101Driver cc1101_;
   RamsesFrameHandler frame_handler_;

@@ -31,6 +31,7 @@ CONF_GDO0_PIN = "gdo0_pin"
 CONF_GDO2_PIN = "gdo2_pin"
 CONF_UART_NUM = "uart_num"
 CONF_COMMAND = "command"
+CONF_TX_FREQ_CORRECTION = "tx_freq_correction"
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -43,6 +44,11 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_GDO2_PIN): pins.gpio_output_pin_schema,
         cv.Optional(CONF_UART_NUM, default=1): cv.int_range(min=0, max=2),
         cv.Optional(CONF_PORT, default=6638): cv.port,
+        # Ręczna korekta rejestru FSCTRL0 (jednostki rejestru, ~1.5869 kHz
+        # każda) stosowana tylko na czas TX — RX koryguje przez AFC, TX nie.
+        # Nie liczona automatycznie: wartość ustala się na podstawie średniej
+        # FREQEST logowanej przy odbiorze (patrz [D] w logu ramses_esp).
+        cv.Optional(CONF_TX_FREQ_CORRECTION, default=0): cv.int_range(min=-128, max=127),
         cv.Optional(CONF_ON_MESSAGE): automation.validate_automation(
             {
                 cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(RamsesMessageTrigger),
@@ -77,6 +83,7 @@ async def to_code(config):
 
     cg.add(var.set_uart_num(config[CONF_UART_NUM]))
     cg.add(var.set_port(config[CONF_PORT]))
+    cg.add(var.set_tx_freq_correction(config[CONF_TX_FREQ_CORRECTION]))
 
     for conf in config.get(CONF_ON_MESSAGE, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)

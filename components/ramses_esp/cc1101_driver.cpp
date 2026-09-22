@@ -290,12 +290,13 @@ void CC1101Driver::fifo_end() {
 // Erratum TI: odczyt TXBYTES potrafi być chwilowo błędny w trakcie
 // opróżniania FIFO, więc dwa kolejne odczyty muszą się zgadzać zanim
 // wynik zostanie zaakceptowany.
-bool CC1101Driver::wait_tx_complete(uint32_t timeout_ms) {
+bool CC1101Driver::wait_tx_complete(uint32_t timeout_ms, uint8_t *out_txbytes, bool *out_underflow) {
   const uint32_t start = millis();
   while (true) {
     uint8_t a = this->read_reg(CC_TXBYTES);
     uint8_t b = this->read_reg(CC_TXBYTES);
     if (a == b) {
+      if (out_txbytes != nullptr) *out_txbytes = b;
       if (a & 0x80) {
         // Jak w evofw3 (cc1101.c/uart.c): po fifo_end() nic już nie
         // dokłada się do FIFO, więc underflow oznacza, że modulator
@@ -305,14 +306,18 @@ bool CC1101Driver::wait_tx_complete(uint32_t timeout_ms) {
         this->tx_underflow_end_count_++;
         ESP_LOGD(TAG, "wait_tx_complete: TX zakończone przez underflow (oczekiwane), licznik=%lu",
                  (unsigned long)this->tx_underflow_end_count_);
+        if (out_underflow != nullptr) *out_underflow = true;
         this->strobe(CC_SFTX);
         return true;
       }
       if ((a & 0x7F) == 0) {
+        if (out_underflow != nullptr) *out_underflow = false;
         return true;
       }
     }
     if (millis() - start > timeout_ms) {
+      if (out_txbytes != nullptr) *out_txbytes = b;
+      if (out_underflow != nullptr) *out_underflow = false;
       ESP_LOGW(TAG, "wait_tx_complete: timeout po %lu ms, TXBYTES=0x%02X — awaryjny SFTX",
                (unsigned long)timeout_ms, b);
       this->strobe(CC_SFTX);
@@ -354,6 +359,22 @@ int8_t CC1101Driver::read_freqest() {
     tries++;
   }
   return static_cast<int8_t>(b);
+}
+
+// TXBYTES (0x3A) — jak RSSI/FREQEST, odczyt statusowy z erratum TI
+// (dwa kolejne odczyty muszą się zgadzać). Do diagnostyki przed STX, gdzie
+// bit underflow (0x80) jeszcze nic nie znaczy — liczy się tylko wypełnienie
+// FIFO po preload.
+uint8_t CC1101Driver::read_txbytes() {
+  uint8_t a = this->read_reg(CC_TXBYTES);
+  uint8_t b = this->read_reg(CC_TXBYTES);
+  uint8_t tries = 0;
+  while (a != b && tries < 10) {
+    a = b;
+    b = this->read_reg(CC_TXBYTES);
+    tries++;
+  }
+  return b;
 }
 
 // Wartość rejestru CC_RAMSES_CFG (tabela konfiguracyjna w RAM) dla danego

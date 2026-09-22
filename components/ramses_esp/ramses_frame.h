@@ -28,6 +28,9 @@ enum FrameRxState {
 // Przerwa bez kolejnego bajtu, po której uznajemy, że transmisja się
 // skończyła (jeden bajt na 38,4 kBd trwa ~208 us — 5 ms to >20 bajtów zapasu).
 #define RAMSES_TRAILER_IDLE_MS 5
+// Liczba ostatnich odczytów FREQEST branych do średniej kroczącej logowanej
+// przy każdym odbiorze — do wyznaczenia ręcznej korekty tx_freq_correction.
+#define RAMSES_FREQEST_HISTORY_N 10
 
 class RamsesFrameHandler {
  public:
@@ -86,6 +89,12 @@ class RamsesFrameHandler {
   RamsesMessage current_msg_;
   uint8_t msg_parse_state_{0};
   uint8_t msg_field_count_{0};
+
+  // Bufor cykliczny ostatnich odczytów FREQEST do średniej kroczącej
+  // logowanej obok wartości bieżącej — patrz record_freqest() w .cpp.
+  int8_t freqest_history_[RAMSES_FREQEST_HISTORY_N]{0};
+  uint8_t freqest_history_count_{0};
+  uint8_t freqest_history_idx_{0};
 
   std::function<void(const RamsesMessage &)> on_message_cb_{nullptr};
 };

@@ -1,6 +1,5 @@
 #include "ramses_esp.h"
 #include "esphome/core/log.h"
-#include "esp_task_wdt.h"
 #include "esp_rom_sys.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -14,24 +13,6 @@ static const char *const TAG = "ramses_esp";
 
 namespace esphome {
 namespace ramses_esp {
-
-// TYMCZASOWE: brama sweepu diagnostycznego w process_tx_queue() — patrz tam.
-// Dopasowuje TYLKO ramki 22F1 nadawane z 37:220902 do 32:148895; wszystko
-// inne (m.in. sygnaturowy pakiet ramses_cc wysyłany zaraz po connect TCP)
-// ma iść normalną, pojedynczą ścieżką TX bez dotykania FSCTRL0.
-static bool ramses_addr_matches(const uint8_t addr_bytes[3], uint8_t dev_class, uint32_t id) {
-  RamsesAddress addr = RamsesAddress::from_bytes(addr_bytes);
-  return addr.is_valid && addr.dev_class == dev_class && addr.id == id;
-}
-
-static bool is_freq_sweep_target(const RamsesMessage &msg) {
-  if (msg.opcode[0] != 0x22 || msg.opcode[1] != 0xF1) return false;
-  if (!(msg.fields & RAMSES_F_ADDR0) || !ramses_addr_matches(msg.addr[0], 37, 220902)) return false;
-  bool dst_match = false;
-  if (msg.fields & RAMSES_F_ADDR1) dst_match |= ramses_addr_matches(msg.addr[1], 32, 148895);
-  if (msg.fields & RAMSES_F_ADDR2) dst_match |= ramses_addr_matches(msg.addr[2], 32, 148895);
-  return dst_match;
-}
 
 void RamsesESPComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up RAMSES ESP component...");
@@ -235,7 +216,7 @@ bool RamsesESPComponent::send_hgi80_command(const std::string &cmd) {
 // RX. Wołający musi już trzymać radio_mutex_. Współdzielone przez normalną
 // kolejkę TX (process_tx_queue) i akcję diagnostyczną freq_sweep, żeby obie
 // ścieżki nadawały identycznie.
-bool RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg, bool echo) {
+bool RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg) {
   ESP_LOGI(TAG, "Transmitting RAMSES packet: %s", tx_msg.to_hgi80().c_str());
 
   this->frame_handler_.rx_disable();
@@ -244,6 +225,14 @@ bool RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg, bo
   std::vector<uint8_t> raw_frame = tx_msg.to_raw_frame();
   this->cc1101_.prepare_tx_mode();
 
+  // Ręczna korekta częstotliwości nadawania (patrz set_tx_freq_correction) —
+  // RX koryguje rozstrojenie kwarcu przez AFC, TX nie ma takiego mechanizmu,
+  // więc bez tego nadajemy systematycznie obok środka pasma odbiornika.
+  // Przywracane do 0x00 po transmisji, bo RX zawsze na tym polega.
+  if (this->tx_freq_correction_ != 0) {
+    this->cc1101_.write_reg(CC_FSCTRL0, static_cast<uint8_t>(this->tx_freq_correction_));
+  }
+
   // Napełniamy TX FIFO PRZED strobem STX — inaczej puste FIFO wywołuje
   // TXFIFO_UNDERFLOW w czasie jednego bajtu i ramka nigdy nie jest wysłana.
   size_t sent = 0;
@@ -251,6 +240,9 @@ bool RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg, bo
   for (; sent < preload; sent++) {
     this->cc1101_.write_fifo(raw_frame[sent]);
   }
+  uint8_t txbytes_preload = this->cc1101_.read_txbytes();
+  ESP_LOGD(TAG, "TXBYTES przed STX (preload %u/%u B): 0x%02X",
+           (unsigned)preload, (unsigned)raw_frame.size(), txbytes_preload);
 
   uint32_t tx_cycle_start_us = micros();
   this->cc1101_.start_tx();
@@ -276,7 +268,11 @@ bool RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg, bo
   // dla dłuższych ramek (payload >~40 B) transmisja trwa dłużej niż
   // 15 ms i była ucinana w połowie, zanim urządzenie zdążyło ją
   // odebrać, mimo że echo niżej i tak zgłaszało sukces.
-  bool tx_ok = this->cc1101_.wait_tx_complete(50);
+  uint8_t txbytes_final = 0;
+  bool ended_by_underflow = false;
+  bool tx_ok = this->cc1101_.wait_tx_complete(50, &txbytes_final, &ended_by_underflow);
+  ESP_LOGD(TAG, "TXBYTES po STX: 0x%02X, underflow=%s, tx_ok=%s",
+           txbytes_final, ended_by_underflow ? "tak" : "nie", tx_ok ? "tak" : "nie");
   if (tx_ok) {
     // TXBYTES==0 (albo underflow) oznacza, że modulator pobrał ostatni
     // bajt z FIFO — jego fizyczne wypromieniowanie trwa jeszcze do
@@ -289,15 +285,16 @@ bool RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg, bo
   }
   if (!tx_ok) {
     ESP_LOGW(TAG, "TX ucięte, echo pominięte: %s", tx_msg.to_hgi80().c_str());
-  } else if (echo) {
+  } else {
     // Echo the transmitted frame back to TCP clients so ramses_tx sees the
     // expected self-echo and can leave its WantEcho state. Wysyłane
     // dopiero po potwierdzonym opróżnieniu FIFO — inaczej log/ramses_tx
     // widziałby poprawną ramkę nawet gdy w eter poleciał tylko urywek.
-    // Wołający z echo=false (patrz process_tx_queue: tryb sweep) sam
-    // decyduje, kiedy echo wysłać, żeby nie zdublować go przy wielu
-    // transmisjach tej samej ramki.
     this->broadcast_hgi80(tx_msg.to_hgi80());
+  }
+
+  if (this->tx_freq_correction_ != 0) {
+    this->cc1101_.write_reg(CC_FSCTRL0, 0x00);
   }
 
   // Powrót do RX bez przepisywania wszystkich 47 rejestrów + PATABLE:
@@ -317,50 +314,7 @@ void RamsesESPComponent::process_tx_queue() {
   RamsesMessage tx_msg;
   if (this->tx_msg_queue_ != nullptr && xQueueReceive(this->tx_msg_queue_, &tx_msg, 0) == pdTRUE) {
     if (xSemaphoreTake(this->radio_mutex_, pdMS_TO_TICKS(200)) == pdTRUE) {
-      if (!is_freq_sweep_target(tx_msg)) {
-        this->transmit_message_locked(tx_msg);
-      } else {
-        // TYMCZASOWE: tryb diagnostyczny — tylko dla 22F1 37:220902 ->
-        // 32:148895. Do cofnięcia po zakończeniu testów (przywrócić
-        // pojedyncze wywołanie transmit_message_locked(tx_msg) powyżej i
-        // usunąć tę gałąź razem z is_freq_sweep_target()).
-        //
-        // Przemiata DEVIATN (0x15), nie FSCTRL0 — FSCTRL0 zostaje na 0x00.
-        static const uint8_t DEVIATN_SWEEP[] = {
-            0x30, 0x34, 0x38, 0x3C, 0x40, 0x43, 0x45, 0x47, 0x50,
-            0x53, 0x55, 0x57, 0x60, 0x63, 0x65, 0x67, 0x70,
-        };
-
-        bool echoed = false;
-        for (uint8_t dev_reg : DEVIATN_SWEEP) {
-          // Karmimy Task WDT co iterację — bez tego, przy ~10 s łącznego
-          // czasu pętli, idle task na tym rdzeniu nie dostawał CPU i układ
-          // resetował się po Task WDT (crash w prvIdleTask).
-          esp_task_wdt_reset();
-
-          this->cc1101_.write_reg(CC_DEVIATN, dev_reg);
-          // dev = 26e6 / 2^17 * (8 + DEVIATION_M) * 2^DEVIATION_E
-          // DEVIATION_E = bity 6:4, DEVIATION_M = bity 2:0.
-          uint8_t dev_e = (dev_reg >> 4) & 0x07;
-          uint8_t dev_m = dev_reg & 0x07;
-          float dev_hz = (26000000.0f / 131072.0f) * (8 + dev_m) * (1 << dev_e);
-          ESP_LOGI(TAG, "SWEEP: DEVIATN=0x%02X (dev=%.2f kHz)", dev_reg, dev_hz / 1000.0f);
-          // Echo dokładnie raz, zaraz po pierwszej udanej transmisji — inaczej
-          // ramses_cc dostałby 17 ech tej samej ramki i zgłosiłby błąd.
-          bool tx_ok = this->transmit_message_locked(tx_msg, !echoed);
-          if (tx_ok && !echoed) {
-            echoed = true;
-          }
-          // vTaskDelay (nie aktywne czekanie na millis()) — oddaje CPU
-          // schedulerowi między strzałami.
-          vTaskDelay(pdMS_TO_TICKS(400));
-        }
-
-        this->cc1101_.write_reg(CC_DEVIATN, this->cc1101_.get_default_reg(CC_DEVIATN));
-        this->cc1101_.enter_rx_mode();
-        this->frame_handler_.rx_enable();
-      }
-
+      this->transmit_message_locked(tx_msg);
       xSemaphoreGive(this->radio_mutex_);
     }
   }
@@ -458,7 +412,7 @@ void RamsesESPComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  IOCFG2/1/0=0x%02X/0x%02X/0x%02X (GDO2/GDO1/GDO0, stan spoczynku)",
                 iocfg2, iocfg1, iocfg0);
   ESP_LOGCONFIG(TAG, "  PATABLE[0] (burst)=0x%02X", patable0);
-  ESP_LOGCONFIG(TAG, "  BUILD: readback-v2");
+  ESP_LOGCONFIG(TAG, "  BUILD: readback-v3");
 }
 
 } // namespace ramses_esp
