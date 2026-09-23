@@ -1,5 +1,6 @@
 #include "ramses_esp.h"
 #include "esphome/core/log.h"
+#include "esphome/core/application.h"  // App.feed_wdt() w start_flood_tx()
 #include "esp_rom_sys.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -355,6 +356,71 @@ void RamsesESPComponent::freq_sweep(const std::string &cmd) {
   xSemaphoreGive(this->radio_mutex_);
 }
 
+// Test zalewania nadajnika: nadaje w kolko jedna, wbudowana na sztywno ramke
+// (22F1 003 000407) tak szybko, jak pozwala normalny cykl STX->RX, przez
+// duration_ms. Reuzywa DOKLADNIE tej samej sciezki wysylki co zwykla kolejka
+// TX i freq_sweep — transmit_message_locked() — zamiast duplikowac logike
+// nadawania. Wolane z lambdy custom API service (patrz example-c6.yaml), wiec
+// biegnie na glownym watku loop(); dlatego karmimy watchdog w kazdej iteracji.
+void RamsesESPComponent::start_flood_tx(uint32_t duration_ms) {
+  // Zabezpieczenie: zla wartosc z API nie moze zablokowac glownej petli
+  // (a z nia API/Wi-Fi) na minuty. Rozsadny zakres to 20-30 s.
+  if (duration_ms < 1000) duration_ms = 1000;
+  if (duration_ms > 60000) {
+    ESP_LOGW(TAG, "Flood TX: duration_ms=%lu za duze, ograniczam do 60000",
+             (unsigned long) duration_ms);
+    duration_ms = 60000;
+  }
+
+  RamsesMessage msg;
+  const char *frame = "I --- 37:220902 32:148895 --:------ 22F1 003 000407";
+  if (!msg.from_hgi80(frame)) {
+    ESP_LOGW(TAG, "Flood TX: nieprawidlowa ramka wbudowana, przerywam: %s", frame);
+    return;
+  }
+
+  if (xSemaphoreTake(this->radio_mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    ESP_LOGW(TAG, "Flood TX: nie udalo sie przejac radia, pomijam");
+    return;
+  }
+
+  ESP_LOGI(TAG, "Flood TX START: %lu ms, ramka=%s",
+           (unsigned long) duration_ms, msg.to_hgi80().c_str());
+
+  uint32_t count = 0;
+  uint32_t start_ms = millis();
+  uint32_t last_log_ms = start_ms;
+
+  // Bez sztucznego opoznienia miedzy nadaniami — tempo dyktuje sam cykl
+  // STX->RX w transmit_message_locked(). Kazda iteracja karmi watchdog,
+  // inaczej Task WDT zresetuje ESP przy tak dlugim blokowaniu loop().
+  for (uint32_t elapsed = 0; elapsed < duration_ms; elapsed = millis() - start_ms) {
+    this->transmit_message_locked(msg);
+    count++;
+    App.feed_wdt();
+
+    uint32_t now = millis();
+    if (now - last_log_ms >= 5000) {
+      last_log_ms = now;
+      ESP_LOGI(TAG, "Flood TX: %lu / %lu ms, wyslano %lu razy",
+               (unsigned long)(now - start_ms), (unsigned long) duration_ms,
+               (unsigned long) count);
+    }
+  }
+
+  // Teardown wykonywany zawsze, niezaleznie jak zakonczyla sie petla, zeby
+  // chip nigdy nie zostal "zawieszony" w stanie nadawania. Wyjatki C++ sa w
+  // tym buildzie wylaczone, wiec to prosty kod liniowy — a transmit_message_
+  // locked() i tak konczy kazdy cykl w RX; tu wymuszamy powrot do nasluchu
+  // jeszcze raz i zwalniamy radio, by radio_task/kolejka TX wrocily do pracy.
+  this->cc1101_.enter_rx_mode();
+  this->frame_handler_.rx_enable();
+  xSemaphoreGive(this->radio_mutex_);
+
+  ESP_LOGI(TAG, "Flood TX ZAKONCZONY, lacznie %lu ramek, powrot do normalnej pracy",
+           (unsigned long) count);
+}
+
 void RamsesESPComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "RAMSES ESP Transceiver & Gateway:");
   ESP_LOGCONFIG(TAG, "  SCK Pin: GPIO%d", this->sck_pin_);
@@ -412,7 +478,7 @@ void RamsesESPComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  IOCFG2/1/0=0x%02X/0x%02X/0x%02X (GDO2/GDO1/GDO0, stan spoczynku)",
                 iocfg2, iocfg1, iocfg0);
   ESP_LOGCONFIG(TAG, "  PATABLE[0] (burst)=0x%02X", patable0);
-  ESP_LOGCONFIG(TAG, "  BUILD: readback-v3");
+  ESP_LOGCONFIG(TAG, "  BUILD: flood-tx-test-v1");
 }
 
 } // namespace ramses_esp

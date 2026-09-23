@@ -17,6 +17,17 @@ external_components:
 
 # Enable Home Assistant API & Web Server / Logging / OTA
 api:
+  # Diagnostyczny test zalewania nadajnika, wywolywalny z Home Assistant przez
+  # Developer Tools -> Actions (ESPHome: <nazwa>: start_flood_tx). Nadaje w kolko
+  # ramke 22F1 003 000407 przez duration_ms (domyslnie 25000; rozsadnie 20000-30000).
+  services:
+    - service: start_flood_tx
+      variables:
+        duration_ms: int
+      then:
+        - lambda: |-
+            // duration_ms==0 (pole zostawione puste w HA) -> domyslne 25000 ms.
+            id(ramses_hub)->start_flood_tx(duration_ms > 0 ? (uint32_t) duration_ms : 25000);
 
 ota:
   - platform: esphome

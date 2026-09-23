@@ -45,6 +45,10 @@ class RamsesESPComponent : public Component {
   // High-level Actions
   bool send_hgi80_command(const std::string &cmd);
   void freq_sweep(const std::string &cmd);
+  // Diagnostyka: nadaje w kolko jedna wbudowana ramke tak szybko, jak pozwala
+  // cykl STX->RX, przez duration_ms. Wolane z lambdy custom API service (patrz
+  // example-c6.yaml). Zawsze wraca do nasluchu RX i zwalnia radio.
+  void start_flood_tx(uint32_t duration_ms);
 
   // Multiplexer arbitration interface
   void pause();
