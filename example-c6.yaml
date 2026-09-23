@@ -28,6 +28,14 @@ api:
         - lambda: |-
             // duration_ms==0 (pole zostawione puste w HA) -> domyslne 25000 ms.
             id(ramses_hub)->start_flood_tx(duration_ms > 0 ? (uint32_t) duration_ms : 25000);
+    # Test A: przemiata korekcje czestotliwosci TX (FSCTRL0) dla ramki
+    # wentylatora i nadaje po kazdym kroku. Odpal i patrz na rekuperator —
+    # jesli drgnie przy ktoryms kroku, log pokazuje wtedy FSCTRL0 do wpisania
+    # w tx_freq_correction. Bez parametrow — ramka zaszyta jak we flood_tx.
+    - service: start_freq_sweep
+      then:
+        - lambda: |-
+            id(ramses_hub)->freq_sweep("I --- 37:220902 32:148895 --:------ 22F1 003 000407");
 
 ota:
   - platform: esphome

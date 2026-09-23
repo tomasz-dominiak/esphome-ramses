@@ -382,6 +382,9 @@ void RamsesESPComponent::freq_sweep(const std::string &cmd) {
     this->cc1101_.write_reg(CC_FSCTRL0, static_cast<uint8_t>(off));
     ESP_LOGI(TAG, "SWEEP: FSCTRL0=%d (%.1f kHz)", off, off * 1.5869f);
     this->transmit_message_locked(msg);
+    // Karmimy watchdog: wolane z lambdy API service blokuje glowny watek na
+    // caly czas sweepu (~15 s), a bez tego Task WDT zresetowalby ESP.
+    App.feed_wdt();
     vTaskDelay(pdMS_TO_TICKS(500));
   }
 
@@ -519,7 +522,7 @@ void RamsesESPComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  IOCFG2/1/0=0x%02X/0x%02X/0x%02X (GDO2/GDO1/GDO0, stan spoczynku)",
                 iocfg2, iocfg1, iocfg0);
   ESP_LOGCONFIG(TAG, "  PATABLE[0] (burst)=0x%02X", patable0);
-  ESP_LOGCONFIG(TAG, "  BUILD: flood-tx-underflow-v2");
+  ESP_LOGCONFIG(TAG, "  BUILD: freq-sweep-service-v3");
 }
 
 } // namespace ramses_esp
