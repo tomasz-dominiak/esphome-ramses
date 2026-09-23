@@ -352,7 +352,15 @@ void RamsesESPComponent::process_tx_queue() {
   RamsesMessage tx_msg;
   if (this->tx_msg_queue_ != nullptr && xQueueReceive(this->tx_msg_queue_, &tx_msg, 0) == pdTRUE) {
     if (xSemaphoreTake(this->radio_mutex_, pdMS_TO_TICKS(200)) == pdTRUE) {
-      this->transmit_message_locked(tx_msg);
+      // === TRYB DIAGNOSTYCZNY (BUILD: sweep-on-send-diag) ===
+      // Kazdy nadany pakiet uruchamia PELNY sweep FSCTRL0 zamiast pojedynczego
+      // TX — zeby dalo sie testowac strojenie czestotliwosci samym wyslaniem
+      // ramki "zmien bieg" z ramses_cc/HA, bez osobnej akcji. Blokuje glowny
+      // watek na ~15 s na pakiet i emituje 31 ech do ramses_cc. Aby wrocic do
+      // normalnej pracy: zamien ponizsza linie z powrotem na
+      //   this->transmit_message_locked(tx_msg);
+      ESP_LOGW(TAG, "TRYB DIAGNOSTYCZNY: kazdy pakiet = pelny sweep FSCTRL0 (nie pojedynczy TX)");
+      this->sweep_message_locked(tx_msg);
       xSemaphoreGive(this->radio_mutex_);
     }
   }
@@ -373,6 +381,15 @@ void RamsesESPComponent::freq_sweep(const std::string &cmd) {
     return;
   }
 
+  this->sweep_message_locked(msg);
+
+  xSemaphoreGive(this->radio_mutex_);
+}
+
+// Wspolna petla sweepu FSCTRL0. Wolajacy musi trzymac radio_mutex_. Nadaje tu
+// samo ramke po kazdym kroku zwykla sciezka TX (transmit_message_locked) i na
+// koncu przywraca FSCTRL0=0x00 oraz RX, zeby chip nie zostal rozstrojony.
+void RamsesESPComponent::sweep_message_locked(const RamsesMessage &msg) {
   static const int FREQ_SWEEP_MIN = -120;
   static const int FREQ_SWEEP_MAX = 120;
   static const int FREQ_SWEEP_STEP = 8;
@@ -382,8 +399,8 @@ void RamsesESPComponent::freq_sweep(const std::string &cmd) {
     this->cc1101_.write_reg(CC_FSCTRL0, static_cast<uint8_t>(off));
     ESP_LOGI(TAG, "SWEEP: FSCTRL0=%d (%.1f kHz)", off, off * 1.5869f);
     this->transmit_message_locked(msg);
-    // Karmimy watchdog: wolane z lambdy API service blokuje glowny watek na
-    // caly czas sweepu (~15 s), a bez tego Task WDT zresetowalby ESP.
+    // Karmimy watchdog: sweep blokuje glowny watek na caly swoj czas (~15 s),
+    // a bez tego Task WDT zresetowalby ESP.
     App.feed_wdt();
     vTaskDelay(pdMS_TO_TICKS(500));
   }
@@ -392,8 +409,6 @@ void RamsesESPComponent::freq_sweep(const std::string &cmd) {
   this->cc1101_.enter_rx_mode();
   this->frame_handler_.rx_enable();
   ESP_LOGI(TAG, "SWEEP: koniec, FSCTRL0 przywrócone do 0x00");
-
-  xSemaphoreGive(this->radio_mutex_);
 }
 
 // Test zalewania nadajnika: nadaje w kolko jedna, wbudowana na sztywno ramke
@@ -522,7 +537,7 @@ void RamsesESPComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  IOCFG2/1/0=0x%02X/0x%02X/0x%02X (GDO2/GDO1/GDO0, stan spoczynku)",
                 iocfg2, iocfg1, iocfg0);
   ESP_LOGCONFIG(TAG, "  PATABLE[0] (burst)=0x%02X", patable0);
-  ESP_LOGCONFIG(TAG, "  BUILD: freq-sweep-service-v3");
+  ESP_LOGCONFIG(TAG, "  BUILD: sweep-on-send-diag-v4 (KAZDY pakiet = pelny sweep FSCTRL0!)");
 }
 
 } // namespace ramses_esp
