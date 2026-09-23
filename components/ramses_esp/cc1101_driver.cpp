@@ -169,8 +169,11 @@ uint8_t CC1101Driver::strobe(uint8_t cmd) {
 }
 
 uint8_t CC1101Driver::write_fifo(uint8_t b) {
-  uint8_t res = this->write_reg(CC_FIFO, b);
-  return res & 0x0F;
+  return this->write_reg(CC_FIFO, b) & CC_FIFO_MASK;
+}
+
+uint8_t CC1101Driver::write_fifo_status(uint8_t b) {
+  return this->write_reg(CC_FIFO, b);
 }
 
 void CC1101Driver::write_fifo_burst(const uint8_t *data, size_t len) {

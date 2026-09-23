@@ -29,6 +29,11 @@ class CC1101Driver {
   uint8_t write_reg(uint8_t addr, uint8_t val);
   uint8_t strobe(uint8_t cmd);
   uint8_t write_fifo(uint8_t b);
+  // Jak write_fifo(), ale zwraca PELNY bajt statusu SPI (bit7 CHIP_RDY,
+  // bity6:4 STATE, bity3:0 wolne miejsce w FIFO), a nie tylko wolne miejsce.
+  // Pozwala wykryc, czy chip wypadl ze stanu TX (np. przedwczesny underflow)
+  // w trakcie napelniania FIFO — patrz refill loop w transmit_message_locked().
+  uint8_t write_fifo_status(uint8_t b);
   void write_fifo_burst(const uint8_t *data, size_t len);
 
   void enter_idle_mode();

@@ -88,6 +88,11 @@ class RamsesESPComponent : public Component {
 
   bool paused_{false};
 
+  // Zabezpiecza DEBUG "brak przedwczesnego underflow" przed spamem: logowany
+  // raz, dopoki nie zostanie wyzerowany (start_flood_tx robi to na poczatku
+  // testu, wiec dostajemy jedno potwierdzenie na przebieg floodu).
+  bool tx_state_ok_logged_{false};
+
   std::vector<std::function<void(const std::string &)>> on_message_callbacks_;
 };
 

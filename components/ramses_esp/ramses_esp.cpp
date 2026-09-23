@@ -249,8 +249,30 @@ bool RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg) {
   this->cc1101_.start_tx();
 
   uint32_t start_ms = millis();
+  bool mid_frame_underflow = false;
   while (sent < raw_frame.size() && (millis() - start_ms < 500)) {
-    uint8_t space = this->cc1101_.write_fifo(raw_frame[sent++]);
+    // Pelny bajt statusu z KAZDEGO zapisu SPI do FIFO, nie tylko wolne
+    // miejsce: bity 6:4 to STATE automatu radia. Zapis SPI do rejestru FIFO
+    // "udaje sie" niezaleznie od tego, czy chip faktycznie nadaje, wiec sam
+    // fakt sent++ nie dowodzi, ze bajt poszedl w eter.
+    uint8_t status = this->cc1101_.write_fifo_status(raw_frame[sent++]);
+    uint8_t space = status & CC_FIFO_MASK;
+    uint8_t state = CC_STATE(status);
+
+    // start_tx() potwierdzil TX zanim tu weszlismy, wiec kazde wypadniecie z
+    // TX PRZED wepchaniem calej ramki to realny przedwczesny underflow (np.
+    // chwilowe opoznienie SPI/przerwanie oproznilo FIFO szybciej, niz zdazyl
+    // dojsc kolejny bajt). Chip sam przeszedl do TX_UNDERFLOW/IDLE, a petla
+    // pisala dalej w prozne — w eter poszla ucieta ramka. To twardy dowod,
+    // logujemy ERROR z dokladnym sent/rozmiarem i przerywamy napelnianie.
+    if (state != CC_STATE_TX) {
+      mid_frame_underflow = true;
+      ESP_LOGE(TAG, "TX PRZEDWCZESNY underflow: STATE=0x%02X po %u/%u B ramki "
+                    "(zapis SPI 'udany', ale radio juz nie nadaje)",
+               state, (unsigned) sent, (unsigned) raw_frame.size());
+      break;
+    }
+
     // TXFIFO (64 B) przy 38,4 kBd drenuje się w ~208 us/bajt — pełny bufor
     // daje ~13 ms zapasu. Gdy prawie pełny, trzeba tylko poczekać, aż
     // radio zwolni jeden bajt (~208 us), a NIE oddawać CPU schedulerowi:
@@ -264,6 +286,15 @@ bool RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg) {
     }
   }
 
+  // Potwierdzenie zdrowej sciezki: cala ramka wepchnieta, a chip ani razu nie
+  // wypadl z TX. Logowane raz na "test" (flaga zerowana w start_flood_tx),
+  // zeby przy tysiacach ramek floodu nie zasypac logu — patrz DEBUG nizej.
+  if (!mid_frame_underflow && sent == raw_frame.size() && !this->tx_state_ok_logged_) {
+    this->tx_state_ok_logged_ = true;
+    ESP_LOGD(TAG, "TX: cala ramka (%u B) wepchnieta, chip caly czas w TX — "
+                  "brak przedwczesnego underflow", (unsigned) raw_frame.size());
+  }
+
   this->cc1101_.fifo_end();
   // Czekamy aż FIFO faktycznie się opróżni zamiast na sztywno 15 ms —
   // dla dłuższych ramek (payload >~40 B) transmisja trwa dłużej niż
@@ -272,6 +303,12 @@ bool RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg) {
   uint8_t txbytes_final = 0;
   bool ended_by_underflow = false;
   bool tx_ok = this->cc1101_.wait_tx_complete(50, &txbytes_final, &ended_by_underflow);
+  // Przedwczesny underflow z petli refill jest rozstrzygajacy: wait_tx_complete
+  // moze go wziac za oczekiwane zakonczenie przez underflow, ale ramka byla
+  // ucieta, wiec wymuszamy porazke (echo pominiete, wolajacy dostaje false).
+  if (mid_frame_underflow) {
+    tx_ok = false;
+  }
   ESP_LOGD(TAG, "TXBYTES po STX: 0x%02X, underflow=%s, tx_ok=%s",
            txbytes_final, ended_by_underflow ? "tak" : "nie", tx_ok ? "tak" : "nie");
   if (tx_ok) {
@@ -387,6 +424,10 @@ void RamsesESPComponent::start_flood_tx(uint32_t duration_ms) {
   ESP_LOGI(TAG, "Flood TX START: %lu ms, ramka=%s",
            (unsigned long) duration_ms, msg.to_hgi80().c_str());
 
+  // Zerujemy flage, zeby ten przebieg floodu dal dokladnie jedno DEBUG
+  // "brak przedwczesnego underflow" (albo ERROR-y, jesli underflow wystapi).
+  this->tx_state_ok_logged_ = false;
+
   uint32_t count = 0;
   uint32_t start_ms = millis();
   uint32_t last_log_ms = start_ms;
@@ -478,7 +519,7 @@ void RamsesESPComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  IOCFG2/1/0=0x%02X/0x%02X/0x%02X (GDO2/GDO1/GDO0, stan spoczynku)",
                 iocfg2, iocfg1, iocfg0);
   ESP_LOGCONFIG(TAG, "  PATABLE[0] (burst)=0x%02X", patable0);
-  ESP_LOGCONFIG(TAG, "  BUILD: flood-tx-test-v1");
+  ESP_LOGCONFIG(TAG, "  BUILD: flood-tx-underflow-v2");
 }
 
 } // namespace ramses_esp
