@@ -12,6 +12,7 @@
 #include "freertos/queue.h"
 #include <vector>
 #include <string>
+#include <atomic>
 
 namespace esphome {
 namespace ramses_esp {
@@ -50,12 +51,28 @@ class RamsesESPComponent : public Component {
   // example-c6.yaml). Zawsze wraca do nasluchu RX i zwalnia radio.
   void start_flood_tx(uint32_t duration_ms);
 
+#ifdef RAMSES_CARRIER_TEST
+  // BUILD DIAGNOSTYCZNY (tylko gdy YAML ustawia carrier_test_duration):
+  // ciagly nosnik na 868,3 MHz przez carrier_test_duration_ms_, wyzwalany
+  // lokalnie (przycisk BOOT). Biegnie we wlasnym tasku FreeRTOS, zeby glowna
+  // petla (logger/API) dzialala dalej i logi szly na zywo.
+  void set_carrier_test_duration(uint32_t ms) { this->carrier_test_duration_ms_ = ms; }
+  void start_carrier_test();
+#endif
+
   // Multiplexer arbitration interface
   void pause();
   void resume();
   bool is_paused() const { return this->paused_; }
 
  protected:
+#ifdef RAMSES_CARRIER_TEST
+  static void carrier_test_trampoline(void *arg);
+  void carrier_test_task();
+  uint32_t carrier_test_duration_ms_{15000};
+  std::atomic<bool> carrier_test_running_{false};
+#endif
+
   void start_tcp_server();
   void handle_tcp_clients();
   void broadcast_hgi80(const std::string &hgi80);

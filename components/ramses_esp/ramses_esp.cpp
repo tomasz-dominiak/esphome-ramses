@@ -480,6 +480,114 @@ void RamsesESPComponent::start_flood_tx(uint32_t duration_ms) {
            (unsigned long) count);
 }
 
+#ifdef RAMSES_CARRIER_TEST
+// === BUILD DIAGNOSTYCZNY: test ciaglego nosnika (carrier_test_duration) ===
+// Wolane z on_press przycisku BOOT (glowna petla). Nie blokuje loop() —
+// cala praca idzie w osobnym tasku, ktory sam bierze i oddaje radio_mutex_
+// (pause()/resume() musza byc w TYM SAMYM tasku, bo mutex FreeRTOS ma
+// wlasciciela).
+void RamsesESPComponent::start_carrier_test() {
+  if (this->radio_mutex_ == nullptr || this->is_failed()) {
+    ESP_LOGW(TAG, "CARRIER TEST: radio niezainicjalizowane, pomijam");
+    return;
+  }
+  if (this->carrier_test_running_.exchange(true)) {
+    ESP_LOGW(TAG, "CARRIER TEST: juz trwa, ignoruje wcisniecie");
+    return;
+  }
+  if (xTaskCreate(RamsesESPComponent::carrier_test_trampoline, "ramses_carrier", 4096, this, 5,
+                  nullptr) != pdPASS) {
+    ESP_LOGE(TAG, "CARRIER TEST: nie udalo sie utworzyc taska");
+    this->carrier_test_running_ = false;
+  }
+}
+
+void RamsesESPComponent::carrier_test_trampoline(void *arg) {
+  reinterpret_cast<RamsesESPComponent *>(arg)->carrier_test_task();
+  vTaskDelete(nullptr);
+}
+
+// Nosnik = zwykla sciezka TX (prepare_tx_mode: IDLE, SCAL, FIFO/infinite,
+// SFTX; ta sama korekta FSCTRL0 co w transmit_message_locked), ale:
+//  - DEVIATN=0x00 -> minimalna dewiacja (~1,6 kHz), czyli praktycznie czysty
+//    ton na 868,3 MHz zamiast GFSK +-50 kHz,
+//  - FIFO dopychane w kolko bajtami 0x00 przez caly test: brak slowa sync
+//    RAMSES i brak poprawnego Manchestera, wiec nic tego nie zdekoduje.
+// resume() -> apply_ramses_config() przywraca wszystkie rejestry (DEVIATN,
+// FSCTRL0, PKTCTRL0, IOCFG0), wlacza RX i oddaje mutex.
+void RamsesESPComponent::carrier_test_task() {
+  static const uint8_t CARRIER_FIFO_TARGET = 60;  // TX FIFO = 64 B, zostaw zapas
+  static const uint8_t CARRIER_FILL[CARRIER_FIFO_TARGET] = {0};
+  const uint32_t duration_ms = this->carrier_test_duration_ms_;
+
+  if (this->is_paused()) {
+    ESP_LOGW(TAG, "CARRIER TEST: radio juz wstrzymane przez kogos innego, pomijam");
+    this->carrier_test_running_ = false;
+    return;
+  }
+  this->pause();
+  if (!this->is_paused()) {
+    ESP_LOGW(TAG, "CARRIER TEST: nie udalo sie przejac radia, pomijam");
+    this->carrier_test_running_ = false;
+    return;
+  }
+
+  this->cc1101_.prepare_tx_mode();
+  this->cc1101_.write_reg(CC_DEVIATN, 0x00);
+  if (this->tx_freq_correction_ != 0) {
+    this->cc1101_.write_reg(CC_FSCTRL0, static_cast<uint8_t>(this->tx_freq_correction_));
+  }
+  this->cc1101_.write_fifo_burst(CARRIER_FILL, CARRIER_FIFO_TARGET);
+
+  ESP_LOGI(TAG, "CARRIER TEST START, %lus (%lu ms), millis=%lu, FSCTRL0=%d",
+           (unsigned long) (duration_ms / 1000), (unsigned long) duration_ms,
+           (unsigned long) millis(), this->tx_freq_correction_);
+
+  const uint32_t start_ms = millis();
+  this->cc1101_.start_tx();
+  if (CC_STATE(this->cc1101_.strobe(CC_SNOP)) != CC_STATE_TX) {
+    ESP_LOGE(TAG, "CARRIER TEST: chip nie wszedl w TX, przerywam");
+  } else {
+    uint32_t restarts = 0;
+    while (millis() - start_ms < duration_ms) {
+      uint8_t txbytes = this->cc1101_.read_txbytes();
+      if (txbytes & 0x80) {
+        // Underflow (task wywlaszczony dluzej niz ~12 ms zapasu FIFO) — chip
+        // sam wyszedl z TX. Restart nosnika; przerwa trwa ulamek ms.
+        restarts++;
+        this->cc1101_.strobe(CC_SFTX);
+        this->cc1101_.write_fifo_burst(CARRIER_FILL, CARRIER_FIFO_TARGET);
+        this->cc1101_.start_tx();
+        continue;
+      }
+      uint8_t used = txbytes & 0x7F;
+      if (used < CARRIER_FIFO_TARGET) {
+        this->cc1101_.write_fifo_burst(CARRIER_FILL, CARRIER_FIFO_TARGET - used);
+      }
+      // 1 tick (1 ms) — 60 B w FIFO przy 38,4 kBd to ~12,5 ms zapasu, a
+      // oddanie CPU pozwala dzialac IDLE/Wi-Fi/loggerowi.
+      vTaskDelay(1);
+    }
+    if (restarts > 0) {
+      ESP_LOGW(TAG, "CARRIER TEST: %lu restartow nosnika po TX underflow (krotkie przerwy)",
+               (unsigned long) restarts);
+    }
+  }
+
+  this->cc1101_.enter_idle_mode();
+  const uint32_t end_ms = millis();
+  this->cc1101_.strobe(CC_SFTX);
+
+  ESP_LOGI(TAG, "CARRIER TEST END, zmierzony czas nadawania %lu ms (zadane %lu ms), "
+                "millis start=%lu koniec=%lu",
+           (unsigned long) (end_ms - start_ms), (unsigned long) duration_ms,
+           (unsigned long) start_ms, (unsigned long) end_ms);
+
+  this->resume();
+  this->carrier_test_running_ = false;
+}
+#endif
+
 void RamsesESPComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "RAMSES ESP Transceiver & Gateway:");
   ESP_LOGCONFIG(TAG, "  SCK Pin: GPIO%d", this->sck_pin_);
@@ -538,6 +646,10 @@ void RamsesESPComponent::dump_config() {
                 iocfg2, iocfg1, iocfg0);
   ESP_LOGCONFIG(TAG, "  PATABLE[0] (burst)=0x%02X", patable0);
   ESP_LOGCONFIG(TAG, "  BUILD: sweep-on-send-diag-v4 (KAZDY pakiet = pelny sweep FSCTRL0!)");
+#ifdef RAMSES_CARRIER_TEST
+  ESP_LOGCONFIG(TAG, "  BUILD: carrier-test (przycisk BOOT -> nosnik 868,3 MHz przez %lu ms)",
+                (unsigned long) this->carrier_test_duration_ms_);
+#endif
 }
 
 } // namespace ramses_esp

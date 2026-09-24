@@ -1,0 +1,71 @@
+# ==============================================================================
+# BUILD DIAGNOSTYCZNY — test ciaglego nosnika 868,3 MHz. NIE do produkcji.
+# ==============================================================================
+# Wcisniecie przycisku BOOT -> pause() (RX off, CC1101 w IDLE) -> nosnik na
+# 868,3 MHz przez carrier_test_duration -> resume() (apply_ramses_config + RX).
+# Nadawane sa same bajty 0x00 z minimalna dewiacja (brak slowa sync RAMSES,
+# brak Manchestera), wiec zaden odbiornik nie zdekoduje tego jako komendy.
+# Start nie zalezy od Wi-Fi/HA/API — Wi-Fi/API sa tu tylko po to, zeby log
+# ("CARRIER TEST START" / "CARRIER TEST END ... ms") byl widoczny na zywo.
+#
+# Ta sama nazwa urzadzenia co example-c6.yaml, zeby OTA trafilo w ten sam
+# ESP. Powrot do normalnego firmware: wgraj ponownie example-c6.yaml.
+substitutions:
+  name: "esphome-ramses"
+  friendly_name: "ESPHome RAMSES Gateway"
+  # Przycisk BOOT: GPIO9 na ESP32-C6 (DevKitC-1), GPIO0 na klasycznym ESP32.
+  carrier_button_pin: GPIO9
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32-c6-devkitc-1
+  framework:
+    type: esp-idf
+
+external_components:
+  - source: components
+    components: [ ramses_esp ]
+
+api:
+
+ota:
+  - platform: esphome
+
+logger:
+  level: DEBUG
+  task_log_buffer_size: 4096
+
+wifi:
+  ssid: "MyWiFiNetwork"
+  password: "MyWiFiPassword"
+
+ramses_esp:
+  id: ramses_hub
+  cs_pin: GPIO18
+  sck_pin: GPIO6
+  mosi_pin: GPIO7
+  miso_pin: GPIO2
+  gdo0_pin: GPIO15
+  gdo2_pin: GPIO14
+  uart_num: 1
+  port: 6638
+  # Obecnosc tego klucza wkompilowuje test nosnika (tylko w tym buildzie).
+  carrier_test_duration: 15s
+
+binary_sensor:
+  - platform: gpio
+    id: carrier_test_button
+    internal: true
+    pin:
+      number: ${carrier_button_pin}
+      mode: INPUT_PULLUP
+      inverted: true
+      ignore_strapping_warning: true
+    filters:
+      - delayed_on: 30ms
+    on_press:
+      - lambda: |-
+          id(ramses_hub)->start_carrier_test();

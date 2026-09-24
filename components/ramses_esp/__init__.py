@@ -32,6 +32,7 @@ CONF_GDO2_PIN = "gdo2_pin"
 CONF_UART_NUM = "uart_num"
 CONF_COMMAND = "command"
 CONF_TX_FREQ_CORRECTION = "tx_freq_correction"
+CONF_CARRIER_TEST_DURATION = "carrier_test_duration"
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -49,6 +50,13 @@ CONFIG_SCHEMA = cv.Schema(
         # Nie liczona automatycznie: wartość ustala się na podstawie średniej
         # FREQEST logowanej przy odbiorze (patrz [D] w logu ramses_esp).
         cv.Optional(CONF_TX_FREQ_CORRECTION, default=0): cv.int_range(min=-128, max=127),
+        # TYLKO build diagnostyczny (diag-carrier-test-c6.yaml): obecnosc klucza
+        # wkompilowuje test ciaglego nosnika (-DRAMSES_CARRIER_TEST). Produkcyjne
+        # YAML-e go nie ustawiaja, wiec ten kod w ogole w nich nie istnieje.
+        cv.Optional(CONF_CARRIER_TEST_DURATION): cv.All(
+            cv.positive_time_period_milliseconds,
+            cv.Range(min=cv.TimePeriod(seconds=1), max=cv.TimePeriod(seconds=120)),
+        ),
         cv.Optional(CONF_ON_MESSAGE): automation.validate_automation(
             {
                 cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(RamsesMessageTrigger),
@@ -84,6 +92,10 @@ async def to_code(config):
     cg.add(var.set_uart_num(config[CONF_UART_NUM]))
     cg.add(var.set_port(config[CONF_PORT]))
     cg.add(var.set_tx_freq_correction(config[CONF_TX_FREQ_CORRECTION]))
+
+    if CONF_CARRIER_TEST_DURATION in config:
+        cg.add_build_flag("-DRAMSES_CARRIER_TEST")
+        cg.add(var.set_carrier_test_duration(config[CONF_CARRIER_TEST_DURATION].total_milliseconds))
 
     for conf in config.get(CONF_ON_MESSAGE, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
