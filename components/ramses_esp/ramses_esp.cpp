@@ -352,7 +352,12 @@ void RamsesESPComponent::process_tx_queue() {
   RamsesMessage tx_msg;
   if (this->tx_msg_queue_ != nullptr && xQueueReceive(this->tx_msg_queue_, &tx_msg, 0) == pdTRUE) {
     if (xSemaphoreTake(this->radio_mutex_, pdMS_TO_TICKS(200)) == pdTRUE) {
-      this->transmit_message_locked(tx_msg);
+      // === TRYB DIAGNOSTYCZNY (BUILD: drate-sweep-on-send, branch diag/baud-sweep) ===
+      // Kazdy nadany pakiet (send_packet / ramses_cc / TCP) uruchamia PELNY
+      // sweep DRATE_M (MDMCFG3) zamiast pojedynczego TX. Blokuje glowny watek
+      // na ~11 s na pakiet i emituje 21 ech do ramses_cc. Normalna praca: main.
+      ESP_LOGW(TAG, "TRYB DIAGNOSTYCZNY: kazdy pakiet = pelny sweep DRATE_M (nie pojedynczy TX)");
+      this->sweep_drate_locked(tx_msg);
       xSemaphoreGive(this->radio_mutex_);
     }
   }
@@ -401,6 +406,40 @@ void RamsesESPComponent::sweep_message_locked(const RamsesMessage &msg) {
   this->cc1101_.enter_rx_mode();
   this->frame_handler_.rx_enable();
   ESP_LOGI(TAG, "SWEEP: koniec, FSCTRL0 przywrócone do 0x00");
+}
+
+// Sweep predkosci transmisji: DRATE_M (MDMCFG3) wokol nominalnej wartosci z
+// CC_RAMSES_CFG, DRATE_E (MDMCFG4) bez zmian. Struktura jak sweep FSCTRL0:
+// po kazdym kroku ta sama ramka zwykla sciezka TX, potem 500 ms przerwy.
+// transmit_message_locked() nie dotyka MDMCFG3, wiec wartosc trzyma sie przez
+// caly cykl TX (RX w trakcie sweepa tez chodzi na tej predkosci). Na koncu
+// przywraca nominalny MDMCFG3. Wolajacy musi trzymac radio_mutex_.
+void RamsesESPComponent::sweep_drate_locked(const RamsesMessage &msg) {
+  static const int DRATE_SWEEP_SPAN = 10;  // +-10 jednostek DRATE_M (~+-2,6%)
+  static const int DRATE_SWEEP_STEP = 1;   // ~99 Bd na jednostke przy DRATE_E=10
+
+  const uint8_t nominal_m = this->cc1101_.get_default_reg(CC_MDMCFG3);
+  const uint8_t drate_e = this->cc1101_.get_default_reg(CC_MDMCFG4) & 0x0F;
+  const float nominal_baud = (256.0f + nominal_m) * (float) (1UL << drate_e) * 26000000.0f / 268435456.0f;
+
+  ESP_LOGI(TAG, "DRATE SWEEP: start, DRATE_E=%u, nominal DRATE_M=%u (0x%02X, %.1f Bd), ramka=%s",
+           drate_e, nominal_m, nominal_m, nominal_baud, msg.to_hgi80().c_str());
+  for (int m = nominal_m - DRATE_SWEEP_SPAN; m <= nominal_m + DRATE_SWEEP_SPAN; m += DRATE_SWEEP_STEP) {
+    if (m < 0 || m > 255) continue;
+    this->cc1101_.write_reg(CC_MDMCFG3, static_cast<uint8_t>(m));
+    float baud = (256.0f + m) * (float) (1UL << drate_e) * 26000000.0f / 268435456.0f;
+    ESP_LOGI(TAG, "DRATE SWEEP: DRATE_M=%d (0x%02X, %+d) -> %.1f Bd (%+.2f%%)",
+             m, m, m - nominal_m, baud, (baud / nominal_baud - 1.0f) * 100.0f);
+    this->transmit_message_locked(msg);
+    // Karmimy watchdog: sweep blokuje glowny watek na caly swoj czas (~11 s).
+    App.feed_wdt();
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+
+  this->cc1101_.write_reg(CC_MDMCFG3, nominal_m);
+  this->cc1101_.enter_rx_mode();
+  this->frame_handler_.rx_enable();
+  ESP_LOGI(TAG, "DRATE SWEEP: koniec, MDMCFG3 przywrocone do 0x%02X (%.1f Bd)", nominal_m, nominal_baud);
 }
 
 // Test zalewania nadajnika: nadaje w kolko jedna, wbudowana na sztywno ramke
@@ -529,7 +568,7 @@ void RamsesESPComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  IOCFG2/1/0=0x%02X/0x%02X/0x%02X (GDO2/GDO1/GDO0, stan spoczynku)",
                 iocfg2, iocfg1, iocfg0);
   ESP_LOGCONFIG(TAG, "  PATABLE[0] (burst)=0x%02X", patable0);
-  ESP_LOGCONFIG(TAG, "  BUILD: normal-tx (pojedynczy TX na pakiet, bez sweepa)");
+  ESP_LOGCONFIG(TAG, "  BUILD: drate-sweep-on-send-v1 (KAZDY pakiet = pelny sweep DRATE_M!)");
   ESP_LOGCONFIG(TAG, "  TX freq correction (FSCTRL0 na czas TX): %d", this->tx_freq_correction_);
 }
 

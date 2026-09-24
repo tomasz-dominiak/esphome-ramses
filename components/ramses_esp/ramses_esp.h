@@ -65,6 +65,8 @@ class RamsesESPComponent : public Component {
   // po kazdym kroku zwykla sciezka TX. Wolajacy musi trzymac radio_mutex_.
   // Uzywane tylko przez akcje freq_sweep() (start_freq_sweep).
   void sweep_message_locked(const RamsesMessage &msg);
+  // Sweep DRATE_M (MDMCFG3) dla jednej ramki — diag/baud-sweep, z process_tx_queue().
+  void sweep_drate_locked(const RamsesMessage &msg);
 
   static void radio_task_trampoline(void *arg);
   void radio_task();
