@@ -176,13 +176,17 @@ uint8_t CC1101Driver::write_fifo_status(uint8_t b) {
   return this->write_reg(CC_FIFO, b);
 }
 
+// Bufor odbiorczy MUSI miec rozmiar calej transakcji: SPI jest full-duplex i
+// odbiera tyle bajtow, ile wysyla. spi_write_bytes() z jednobajtowym statusem
+// nadpisywal tu stos (m.in. wskaznik std::vector) -> abort w free().
 void CC1101Driver::write_fifo_burst(const uint8_t *data, size_t len) {
   if (len == 0) return;
-  std::vector<uint8_t> buf(len + 1);
-  buf[0] = CC_FIFO | CC_BURST;
-  memcpy(buf.data() + 1, data, len);
-  uint8_t status = 0;
-  this->spi_write_bytes(&status, buf.data(), buf.size());
+  if (len > 63) len = 63;  // max_transfer_sz busa = 64 B, w tym bajt naglowka
+  uint8_t tx[64];
+  uint8_t rx[64];
+  tx[0] = CC_FIFO | CC_BURST;
+  memcpy(tx + 1, data, len);
+  this->spi_read_bytes(rx, tx, len + 1);
 }
 
 void CC1101Driver::enter_idle_mode() {
