@@ -128,10 +128,15 @@ void CC1101Driver::spi_reset() {
   delayMicroseconds(41);
 }
 
+// status to JEDEN bajt (bajt statusu CC1101 odebrany przy bajcie naglowka).
+// SPI jest full-duplex i bez rxlength odbieraloby tyle bajtow, ile wysyla —
+// write_reg() (2 B) nadpisywal wtedy 1 bajt stosu, a write_fifo_burst()
+// kilkadziesiat (abort w free()). rxlength=8 ogranicza odbior do statusu.
 bool CC1101Driver::spi_write_bytes(uint8_t *status, const uint8_t *data, size_t len) {
   if (len == 0 || this->spi_handle_ == nullptr) return false;
   spi_transaction_t t = {
       .length = len * 8,
+      .rxlength = 8,
       .tx_buffer = data,
       .rx_buffer = status,
   };
