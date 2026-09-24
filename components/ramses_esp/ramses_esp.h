@@ -63,7 +63,7 @@ class RamsesESPComponent : public Component {
   bool transmit_message_locked(const RamsesMessage &tx_msg);
   // Przemiata FSCTRL0 (korekcja czestotliwosci TX) dla jednej ramki, nadajac
   // po kazdym kroku zwykla sciezka TX. Wolajacy musi trzymac radio_mutex_.
-  // Wspoldzielone przez freq_sweep() i (w trybie diagnostycznym) process_tx_queue().
+  // Uzywane tylko przez akcje freq_sweep() (start_freq_sweep).
   void sweep_message_locked(const RamsesMessage &msg);
 
   static void radio_task_trampoline(void *arg);

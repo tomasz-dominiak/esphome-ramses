@@ -352,15 +352,7 @@ void RamsesESPComponent::process_tx_queue() {
   RamsesMessage tx_msg;
   if (this->tx_msg_queue_ != nullptr && xQueueReceive(this->tx_msg_queue_, &tx_msg, 0) == pdTRUE) {
     if (xSemaphoreTake(this->radio_mutex_, pdMS_TO_TICKS(200)) == pdTRUE) {
-      // === TRYB DIAGNOSTYCZNY (BUILD: sweep-on-send-diag) ===
-      // Kazdy nadany pakiet uruchamia PELNY sweep FSCTRL0 zamiast pojedynczego
-      // TX — zeby dalo sie testowac strojenie czestotliwosci samym wyslaniem
-      // ramki "zmien bieg" z ramses_cc/HA, bez osobnej akcji. Blokuje glowny
-      // watek na ~15 s na pakiet i emituje 31 ech do ramses_cc. Aby wrocic do
-      // normalnej pracy: zamien ponizsza linie z powrotem na
-      //   this->transmit_message_locked(tx_msg);
-      ESP_LOGW(TAG, "TRYB DIAGNOSTYCZNY: kazdy pakiet = pelny sweep FSCTRL0 (nie pojedynczy TX)");
-      this->sweep_message_locked(tx_msg);
+      this->transmit_message_locked(tx_msg);
       xSemaphoreGive(this->radio_mutex_);
     }
   }
@@ -537,7 +529,8 @@ void RamsesESPComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  IOCFG2/1/0=0x%02X/0x%02X/0x%02X (GDO2/GDO1/GDO0, stan spoczynku)",
                 iocfg2, iocfg1, iocfg0);
   ESP_LOGCONFIG(TAG, "  PATABLE[0] (burst)=0x%02X", patable0);
-  ESP_LOGCONFIG(TAG, "  BUILD: sweep-on-send-diag-v4 (KAZDY pakiet = pelny sweep FSCTRL0!)");
+  ESP_LOGCONFIG(TAG, "  BUILD: normal-tx (pojedynczy TX na pakiet, bez sweepa)");
+  ESP_LOGCONFIG(TAG, "  TX freq correction (FSCTRL0 na czas TX): %d", this->tx_freq_correction_);
 }
 
 } // namespace ramses_esp
