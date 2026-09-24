@@ -39,6 +39,9 @@ class CC1101Driver {
   void enter_idle_mode();
   void enter_rx_mode();
   void prepare_tx_mode();
+  // TX async serial (PKTCTRL0=0x32): CC1101 moduluje poziom na swoim GDO0.
+  void prepare_tx_async_mode();
+  bool start_tx_async();
   void start_tx();
   void fifo_end();
   bool wait_tx_complete(uint32_t timeout_ms, uint8_t *out_txbytes = nullptr, bool *out_underflow = nullptr);

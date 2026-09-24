@@ -258,6 +258,45 @@ void CC1101Driver::prepare_tx_mode() {
   this->strobe(CC_SFTX);
 }
 
+// Lustro enter_rx_mode(): async serial, infinite. W tym trybie dane TX
+// wchodza WYLACZNIE przez pin GDO0 chipa; IOCFG0=0x2E (high-Z), zeby chip nie
+// walczyl z UART TX ESP32 na tej linii. Brak FIFO, wiec brak SFTX/TXBYTES.
+void CC1101Driver::prepare_tx_async_mode() {
+  this->enter_idle_mode();
+
+  this->strobe(CC_SCAL);
+  const uint32_t cal_start = millis();
+  uint8_t marcstate = this->read_reg(CC_MARCSTATE);
+  while (marcstate != CC_MARCSTATE_IDLE) {
+    if (millis() - cal_start > CC_STATE_TIMEOUT_MS) {
+      ESP_LOGW(TAG, "prepare_tx_async_mode: timeout kalibracji SCAL, MARCSTATE=0x%02X", marcstate);
+      break;
+    }
+    delayMicroseconds(10);
+    marcstate = this->read_reg(CC_MARCSTATE);
+  }
+
+  this->write_reg(CC_IOCFG0, 0x2E);
+  this->write_reg(CC_PKTCTRL0, 0x32);
+}
+
+// STX i czekanie na stan TX wylacznie z bajtu statusu strobe'a — bez
+// dodatkowych odczytow rejestrow w trakcie nadawania.
+bool CC1101Driver::start_tx_async() {
+  const uint32_t start = millis();
+  uint8_t state = CC_STATE(this->strobe(CC_STX));
+  while (state != CC_STATE_TX) {
+    if (millis() - start > CC_STATE_TIMEOUT_MS) {
+      ESP_LOGW(TAG, "start_tx_async: timeout, stan=0x%02X", state);
+      this->strobe(CC_SIDLE);
+      return false;
+    }
+    delayMicroseconds(10);
+    state = CC_STATE(this->strobe(CC_STX));
+  }
+  return true;
+}
+
 void CC1101Driver::start_tx() {
   const uint32_t start = millis();
   uint8_t state = CC_STATE(this->strobe(CC_STX));

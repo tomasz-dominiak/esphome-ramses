@@ -95,8 +95,8 @@ ramses_esp:
   sck_pin: GPIO6
   mosi_pin: GPIO7
   miso_pin: GPIO2
-  gdo0_pin: GPIO15 # Demodulated UART RX from CC1101 GDO0
-  gdo2_pin: GPIO14 # CC1101 GDO2 (optional)
+  gdo0_pin: GPIO15 # ESP UART RX <- fizycznie GDO2 chipa (IOCFG2=0x0D, dane RX). Nazwa myli!
+  gdo2_pin: GPIO14 # ESP UART TX -> fizycznie GDO0 chipa (dane TX async). WYMAGANY dla TX w diag/uart-tx
   uart_num: 1      # ESP32 hardware UART peripheral (default: 1)
   port: 6638       # TCP port for Home Assistant ramses_rf / ramses_cc (socket://<ip>:6638)
   on_message:

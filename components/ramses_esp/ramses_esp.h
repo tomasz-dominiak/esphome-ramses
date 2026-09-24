@@ -65,6 +65,8 @@ class RamsesESPComponent : public Component {
   // po kazdym kroku zwykla sciezka TX. Wolajacy musi trzymac radio_mutex_.
   // Uzywane tylko przez akcje freq_sweep() (start_freq_sweep).
   void sweep_message_locked(const RamsesMessage &msg);
+  // Autotest mapowania chip GDO0/GDO2 -> gdo0_pin/gdo2_pin (patrz .cpp).
+  void check_gdo_wiring();
 
   static void radio_task_trampoline(void *arg);
   void radio_task();
@@ -96,6 +98,11 @@ class RamsesESPComponent : public Component {
   // raz, dopoki nie zostanie wyzerowany (start_flood_tx robi to na poczatku
   // testu, wiec dostajemy jedno potwierdzenie na przebieg floodu).
   bool tx_state_ok_logged_{false};
+
+  // Wynik check_gdo_wiring(): [chip GDO0, chip GDO2][gdo0_pin, gdo2_pin],
+  // 1 = pin sledzi wyjscie, 0 = nie, -1 = pin nieskonfigurowany.
+  int8_t gdo_wiring_[2][2]{{-1, -1}, {-1, -1}};
+  bool gdo_wiring_checked_{false};
 
   std::vector<std::function<void(const std::string &)>> on_message_callbacks_;
 };

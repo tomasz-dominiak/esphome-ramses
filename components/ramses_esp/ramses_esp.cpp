@@ -34,6 +34,8 @@ void RamsesESPComponent::setup() {
     return;
   }
 
+  this->check_gdo_wiring();
+
   this->frame_handler_.set_on_message_callback([this](const RamsesMessage &msg) {
     if (this->rx_msg_queue_ != nullptr) {
       xQueueSend(this->rx_msg_queue_, &msg, 0);
@@ -213,139 +215,117 @@ bool RamsesESPComponent::send_hgi80_command(const std::string &cmd) {
   return false;
 }
 
-// Pełny cykl nadawania jednej ramki: FIFO, STX, wait_tx_complete, powrót do
-// RX. Wołający musi już trzymać radio_mutex_. Współdzielone przez normalną
-// kolejkę TX (process_tx_queue) i akcję diagnostyczną freq_sweep, żeby obie
-// ścieżki nadawały identycznie.
+// Pelny cykl nadawania jednej ramki — BUILD diag/uart-tx: async serial przez
+// sprzetowy UART ESP32, lustrzanie do RX. Wolajacy musi trzymac radio_mutex_.
+//
+// Dlaczego nie FIFO: to_raw_frame() zwraca bajty na poziomie UART (te same,
+// ktore RX widzi PO zdekodowaniu przez UART ESP32: 8N1, LSB-first). Stara
+// sciezka ladowala je do TX FIFO CC1101, ktore nadaje gole 8 bitow MSB-first —
+// w eter szedl strumien bez bitow start/stop i z odwrocona kolejnoscia bitow.
+// Tutaj CC1101 w trybie async (PKTCTRL0=0x32) moduluje wprost poziom na swoim
+// GDO0, a ten poziom generuje UART ESP32 (TX = gdo2_pin z configu, fizycznie
+// GDO0 chipa — patrz check_gdo_wiring()), wiec start/stop i kolejnosc bitow
+// robi sprzet dokladnie tak, jak po stronie RX.
+//
+// Zadnego odpytywania TXBYTES/SPI w trakcie nadawania: koniec wykrywa
+// uart_wait_tx_done() (przerwanie TX_DONE UART-u, nie polling statusu chipa).
 bool RamsesESPComponent::transmit_message_locked(const RamsesMessage &tx_msg) {
-  ESP_LOGI(TAG, "Transmitting RAMSES packet: %s", tx_msg.to_hgi80().c_str());
+  ESP_LOGI(TAG, "Transmitting RAMSES packet (UART async): %s", tx_msg.to_hgi80().c_str());
 
-  this->frame_handler_.rx_disable();
-  this->cc1101_.enter_idle_mode();
+  if (this->gdo2_pin_ == GPIO_NUM_NC) {
+    ESP_LOGE(TAG, "TX UART wymaga gdo2_pin (UART TX -> GDO0 chipa), pomijam: %s",
+             tx_msg.to_hgi80().c_str());
+    return false;
+  }
 
   std::vector<uint8_t> raw_frame = tx_msg.to_raw_frame();
-  this->cc1101_.prepare_tx_mode();
 
-  // Ręczna korekta częstotliwości nadawania (patrz set_tx_freq_correction) —
-  // RX koryguje rozstrojenie kwarcu przez AFC, TX nie ma takiego mechanizmu,
-  // więc bez tego nadajemy systematycznie obok środka pasma odbiornika.
-  // Przywracane do 0x00 po transmisji, bo RX zawsze na tym polega.
+  this->frame_handler_.rx_disable();
+  this->cc1101_.prepare_tx_async_mode();
+
+  // Reczna korekta czestotliwosci nadawania (patrz set_tx_freq_correction);
+  // przywracana do 0x00 po transmisji, bo RX zawsze na tym polega.
   if (this->tx_freq_correction_ != 0) {
     this->cc1101_.write_reg(CC_FSCTRL0, static_cast<uint8_t>(this->tx_freq_correction_));
   }
 
-  // Napełniamy TX FIFO PRZED strobem STX — inaczej puste FIFO wywołuje
-  // TXFIFO_UNDERFLOW w czasie jednego bajtu i ramka nigdy nie jest wysłana.
-  size_t sent = 0;
-  size_t preload = std::min<size_t>(64, raw_frame.size());
-  for (; sent < preload; sent++) {
-    this->cc1101_.write_fifo(raw_frame[sent]);
-  }
-  uint8_t txbytes_preload = this->cc1101_.read_txbytes();
-  ESP_LOGD(TAG, "TXBYTES przed STX (preload %u/%u B): 0x%02X",
-           (unsigned)preload, (unsigned)raw_frame.size(), txbytes_preload);
-
   uint32_t tx_cycle_start_us = micros();
-  this->cc1101_.start_tx();
-
-  uint32_t start_ms = millis();
-  bool mid_frame_underflow = false;
-  while (sent < raw_frame.size() && (millis() - start_ms < 500)) {
-    // Pelny bajt statusu z KAZDEGO zapisu SPI do FIFO, nie tylko wolne
-    // miejsce: bity 6:4 to STATE automatu radia. Zapis SPI do rejestru FIFO
-    // "udaje sie" niezaleznie od tego, czy chip faktycznie nadaje, wiec sam
-    // fakt sent++ nie dowodzi, ze bajt poszedl w eter.
-    uint8_t status = this->cc1101_.write_fifo_status(raw_frame[sent++]);
-    uint8_t space = status & CC_FIFO_MASK;
-    uint8_t state = CC_STATE(status);
-
-    // start_tx() potwierdzil TX zanim tu weszlismy, wiec kazde wypadniecie z
-    // TX PRZED wepchaniem calej ramki to realny przedwczesny underflow (np.
-    // chwilowe opoznienie SPI/przerwanie oproznilo FIFO szybciej, niz zdazyl
-    // dojsc kolejny bajt). Chip sam przeszedl do TX_UNDERFLOW/IDLE, a petla
-    // pisala dalej w prozne — w eter poszla ucieta ramka. To twardy dowod,
-    // logujemy ERROR z dokladnym sent/rozmiarem i przerywamy napelnianie.
-    if (state != CC_STATE_TX) {
-      mid_frame_underflow = true;
-      ESP_LOGE(TAG, "TX PRZEDWCZESNY underflow: STATE=0x%02X po %u/%u B ramki "
-                    "(zapis SPI 'udany', ale radio juz nie nadaje)",
-               state, (unsigned) sent, (unsigned) raw_frame.size());
-      break;
-    }
-
-    // TXFIFO (64 B) przy 38,4 kBd drenuje się w ~208 us/bajt — pełny bufor
-    // daje ~13 ms zapasu. Gdy prawie pełny, trzeba tylko poczekać, aż
-    // radio zwolni jeden bajt (~208 us), a NIE oddawać CPU schedulerowi:
-    // vTaskDelay() tutaj czekał "co najmniej" 1-2 znaczniki (1-2 ms przy
-    // domyślnym ticku 1 ms) i przy współbieżnym ruchu Wi-Fi/TCP faktyczny
-    // czas potrafił być dłuższy, zjadając margines bufora — stąd
-    // TXFIFO_UNDERFLOW w ~12% nadań. Krótkie zajęte oczekiwanie (jak
-    // reszta sterownika, patrz cc1101_driver.cpp) usuwa to ryzyko.
-    if (space < 4) {
-      esp_rom_delay_us(200);
-    }
-  }
-
-  // Potwierdzenie zdrowej sciezki: cala ramka wepchnieta, a chip ani razu nie
-  // wypadl z TX. Logowane raz na "test" (flaga zerowana w start_flood_tx),
-  // zeby przy tysiacach ramek floodu nie zasypac logu — patrz DEBUG nizej.
-  if (!mid_frame_underflow && sent == raw_frame.size() && !this->tx_state_ok_logged_) {
-    this->tx_state_ok_logged_ = true;
-    ESP_LOGD(TAG, "TX: cala ramka (%u B) wepchnieta, chip caly czas w TX — "
-                  "brak przedwczesnego underflow", (unsigned) raw_frame.size());
-  }
-
-  this->cc1101_.fifo_end();
-  // Czekamy aż FIFO faktycznie się opróżni zamiast na sztywno 15 ms —
-  // dla dłuższych ramek (payload >~40 B) transmisja trwa dłużej niż
-  // 15 ms i była ucinana w połowie, zanim urządzenie zdążyło ją
-  // odebrać, mimo że echo niżej i tak zgłaszało sukces.
-  uint8_t txbytes_final = 0;
-  bool ended_by_underflow = false;
-  bool tx_ok = this->cc1101_.wait_tx_complete(50, &txbytes_final, &ended_by_underflow);
-  // Przedwczesny underflow z petli refill jest rozstrzygajacy: wait_tx_complete
-  // moze go wziac za oczekiwane zakonczenie przez underflow, ale ramka byla
-  // ucieta, wiec wymuszamy porazke (echo pominiete, wolajacy dostaje false).
-  if (mid_frame_underflow) {
-    tx_ok = false;
-  }
-  ESP_LOGD(TAG, "TXBYTES po STX: 0x%02X, underflow=%s, tx_ok=%s",
-           txbytes_final, ended_by_underflow ? "tak" : "nie", tx_ok ? "tak" : "nie");
+  bool tx_ok = this->cc1101_.start_tx_async();
+  size_t written = 0;
   if (tx_ok) {
-    // TXBYTES==0 (albo underflow) oznacza, że modulator pobrał ostatni
-    // bajt z FIFO — jego fizyczne wypromieniowanie trwa jeszcze do
-    // jednego okresu bajtu (8 bitów / 38 383 Bd = ~208 us). SIDLE tuż
-    // po tym ucinałoby ogon ramki, niewidocznie dla nas, a dla
-    // odbiorcy jako zła suma kontrolna. 300 us to pełny okres bajtu z
-    // zapasem. esp_rom_delay_us, nie vTaskDelay — nie może tego
-    // wywłaszczyć scheduler.
-    esp_rom_delay_us(300);
+    // Linia UART TX stoi w spoczynku na 1, wiec przed pierwszym bitem startu
+    // CC1101 nadaje po prostu nosnik "1" — nieszkodliwe, jak idle w RX.
+    int w = uart_write_bytes(this->uart_num_, raw_frame.data(), raw_frame.size());
+    written = w > 0 ? (size_t) w : 0;
+    // 10 bitow/bajt przy 38 400 Bd = ~260 us/bajt; 162 B to ~42 ms.
+    esp_err_t err = uart_wait_tx_done(this->uart_num_, pdMS_TO_TICKS(200));
+    tx_ok = (err == ESP_OK) && written == raw_frame.size();
+    // TX_DONE = ostatni bit stopu wyszedl z UART-u; zapas na probkowanie
+    // pinu przez modulator CC1101, zanim SIDLE utnie nosnik.
+    esp_rom_delay_us(100);
   }
-  if (!tx_ok) {
-    ESP_LOGW(TAG, "TX ucięte, echo pominięte: %s", tx_msg.to_hgi80().c_str());
-  } else {
-    // Echo the transmitted frame back to TCP clients so ramses_tx sees the
-    // expected self-echo and can leave its WantEcho state. Wysyłane
-    // dopiero po potwierdzonym opróżnieniu FIFO — inaczej log/ramses_tx
-    // widziałby poprawną ramkę nawet gdy w eter poleciał tylko urywek.
-    this->broadcast_hgi80(tx_msg.to_hgi80());
-  }
+
+  this->cc1101_.enter_idle_mode();
+  uint32_t tx_air_us = micros() - tx_cycle_start_us;
 
   if (this->tx_freq_correction_ != 0) {
     this->cc1101_.write_reg(CC_FSCTRL0, 0x00);
   }
 
-  // Powrót do RX bez przepisywania wszystkich 47 rejestrów + PATABLE:
-  // nadawanie zmienia tylko PKTCTRL0 i IOCFG0, a te dwa i tak ustawia
-  // enter_rx_mode(). Skraca to okno głuchoty gateway'a po transmisji —
-  // urządzenia w sieci RAMSES odpowiadają po 16-21 ms, więc każda
-  // dodatkowa milisekunda martwego czasu gubi odpowiedzi.
+  // enter_rx_mode() ustawia z powrotem PKTCTRL0=0x32 i IOCFG0=0x2E.
   this->cc1101_.enter_rx_mode();
   this->frame_handler_.rx_enable();
 
-  uint32_t tx_cycle_us = micros() - tx_cycle_start_us;
-  ESP_LOGD(TAG, "Cykl STX -> z powrotem w RX: %lu us", (unsigned long)tx_cycle_us);
+  ESP_LOGD(TAG, "TX UART: %u/%u B, STX -> IDLE %lu us (oczekiwane ~%lu us), tx_ok=%s",
+           (unsigned) written, (unsigned) raw_frame.size(), (unsigned long) tx_air_us,
+           (unsigned long) (raw_frame.size() * 10UL * 1000000UL / 38400UL), tx_ok ? "tak" : "nie");
+
+  if (!tx_ok) {
+    ESP_LOGW(TAG, "TX nieudane, echo pominiete: %s", tx_msg.to_hgi80().c_str());
+  } else {
+    // Echo do klientow TCP, zeby ramses_tx dostal oczekiwane self-echo.
+    this->broadcast_hgi80(tx_msg.to_hgi80());
+  }
   return tx_ok;
+}
+
+// Autotest okablowania GDO: kazde wyjscie GDO chipa po kolei wymuszamy na
+// stale 0 i 1 (IOCFGx = 0x2F / 0x6F, "HW to 0" + INV), trzymajac drugie na
+// stalym 1, i czytamy oba piny ESP. Daje pelna mape chip GDOx -> GPIO ESP,
+// niezaleznie od nazw w YAML-u. Wolane raz w setup(), zanim ruszy radio_task;
+// wynik logowany w dump_config() (logi z setup() nie docieraja do API).
+void RamsesESPComponent::check_gdo_wiring() {
+  const uint8_t regs[2] = {CC_IOCFG0, CC_IOCFG2};
+  const gpio_num_t pins[2] = {this->gdo0_pin_, this->gdo2_pin_};
+
+  this->cc1101_.enter_idle_mode();
+  // Pin UART TX na chwile jako wejscie, zeby dalo sie z niego czytac.
+  if (this->gdo2_pin_ != GPIO_NUM_NC) {
+    gpio_set_direction(this->gdo2_pin_, GPIO_MODE_INPUT);
+  }
+  for (int g = 0; g < 2; g++) {
+    this->cc1101_.write_reg(regs[1 - g], 0x6F);  // drugie GDO: stale 1
+    this->cc1101_.write_reg(regs[g], 0x2F);      // badane GDO: stale 0
+    esp_rom_delay_us(50);
+    int lo[2], hi[2];
+    for (int p = 0; p < 2; p++) lo[p] = pins[p] == GPIO_NUM_NC ? -1 : gpio_get_level(pins[p]);
+    this->cc1101_.write_reg(regs[g], 0x6F);      // badane GDO: stale 1
+    esp_rom_delay_us(50);
+    for (int p = 0; p < 2; p++) hi[p] = pins[p] == GPIO_NUM_NC ? -1 : gpio_get_level(pins[p]);
+    for (int p = 0; p < 2; p++) {
+      this->gdo_wiring_[g][p] = lo[p] < 0 ? -1 : ((lo[p] == 0 && hi[p] == 1) ? 1 : 0);
+    }
+  }
+  this->cc1101_.write_reg(CC_IOCFG0, this->cc1101_.get_default_reg(CC_IOCFG0));
+  this->cc1101_.write_reg(CC_IOCFG2, this->cc1101_.get_default_reg(CC_IOCFG2));
+
+  // gpio_set_direction() odpina sygnal UART TXD z matrycy — przywracamy
+  // dokladnie to samo przypisanie co RamsesFrameHandler::init().
+  uart_set_pin(this->uart_num_, this->gdo2_pin_, this->gdo0_pin_, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+  this->cc1101_.enter_rx_mode();
+  this->frame_handler_.rx_flush();
+  this->frame_handler_.rx_enable();
+  this->gdo_wiring_checked_ = true;
 }
 
 void RamsesESPComponent::process_tx_queue() {
@@ -529,7 +509,26 @@ void RamsesESPComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  IOCFG2/1/0=0x%02X/0x%02X/0x%02X (GDO2/GDO1/GDO0, stan spoczynku)",
                 iocfg2, iocfg1, iocfg0);
   ESP_LOGCONFIG(TAG, "  PATABLE[0] (burst)=0x%02X", patable0);
-  ESP_LOGCONFIG(TAG, "  BUILD: normal-tx (pojedynczy TX na pakiet, bez sweepa)");
+  ESP_LOGCONFIG(TAG, "  BUILD: uart-tx-v1 (TX async przez UART ESP32 -> GDO0 chipa, bez FIFO)");
+  if (this->gdo_wiring_checked_) {
+    static const char *const gdo_names[2] = {"GDO0 (wejscie danych TX)", "GDO2 (wyjscie danych RX)"};
+    static const char *const pin_names[2] = {"gdo0_pin", "gdo2_pin"};
+    const gpio_num_t pins[2] = {this->gdo0_pin_, this->gdo2_pin_};
+    ESP_LOGCONFIG(TAG, "  Autotest okablowania (chip GDOx -> pin ESP):");
+    for (int g = 0; g < 2; g++) {
+      for (int p = 0; p < 2; p++) {
+        if (this->gdo_wiring_[g][p] < 0) continue;
+        ESP_LOGCONFIG(TAG, "    chip %s -> %s (GPIO%d): %s", gdo_names[g], pin_names[p], pins[p],
+                      this->gdo_wiring_[g][p] ? "POLACZONE" : "-");
+      }
+    }
+    if (this->gdo_wiring_[0][1] != 1) {
+      ESP_LOGE(TAG, "  GDO0 chipa NIE jest na gdo2_pin (UART TX) — TX przez UART nie zadziala!");
+    }
+    if (this->gdo_wiring_[1][0] != 1) {
+      ESP_LOGW(TAG, "  GDO2 chipa nie wykryte na gdo0_pin (UART RX) — sprawdz okablowanie");
+    }
+  }
   ESP_LOGCONFIG(TAG, "  TX freq correction (FSCTRL0 na czas TX): %d", this->tx_freq_correction_);
 }
 
